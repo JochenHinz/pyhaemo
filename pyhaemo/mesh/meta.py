@@ -1,16 +1,16 @@
 """
 Module containing the :type:`MeshMeta` metaclass for use in
-:class:`splico.mesh.Mesh`.
+:class:`pyhaemo.mesh.Mesh`.
 
 @author: Jochen Hinz
 """
 
-from splico.types import ImmutableMeta
+from pyhaemo.types import ImmutableMeta
 
 
 class MeshMeta(ImmutableMeta):
   """
-  Metaclass for :class:`splico.mesh.Mesh` that ensures that the mesh class
+  Metaclass for :class:`pyhaemo.mesh.Mesh` that ensures that the mesh class
   implements the necessary class-level attributes. The class-level attributes
   are copied from the reference element class to the mesh class. The reference
   element class must implement the following class-level attributes:

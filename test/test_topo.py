@@ -1,7 +1,7 @@
-from splico.topo import Topology
-from splico.nutils.interface import infer_topo
-from splico.geo.disc import ellipse, PATCHES
-from splico.geo.interp import linear_interpolation
+from pyhaemo.topo import Topology
+from pyhaemo.nutils.interface import infer_topo
+from pyhaemo.geo.disc import ellipse, PATCHES
+from pyhaemo.geo.interp import linear_interpolation
 
 import unittest
 

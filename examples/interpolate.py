@@ -1,7 +1,7 @@
-from splico.util import np, _
-from splico.geo import interp, ellipse
-from splico.spl import NDSpline, NDSplineArray
-from splico.mesh import rectilinear, mesh_union
+from pyhaemo.util import np, _
+from pyhaemo.geo import interp, ellipse
+from pyhaemo.spl import NDSpline, NDSplineArray
+from pyhaemo.mesh import rectilinear, mesh_union
 
 from numpy.typing import ArrayLike
 
@@ -23,9 +23,9 @@ def main(spl0: Spline, spl1: Spline, t0: ArrayLike, t1=None) -> None:
 
     Parameters
     ----------
-    spl0 : :class:`splico.spl.NDSpline`
+    spl0 : :class:`pyhaemo.spl.NDSpline`
         The first input spline.
-    spl1 : :class:`splico.spl.NDSpline`
+    spl1 : :class:`pyhaemo.spl.NDSpline`
         The second input spline.
     t0 : :class:`np.ndarray`
         The desired tangent at xn+1 == 0.

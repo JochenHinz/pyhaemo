@@ -1,6 +1,6 @@
-from splico.spl import UnivariateKnotVector, TensorKnotVector
-from splico.mesh import rectilinear
-from splico.util import np, flat_meshgrid
+from pyhaemo.spl import UnivariateKnotVector, TensorKnotVector
+from pyhaemo.mesh import rectilinear
+from pyhaemo.util import np, flat_meshgrid
 
 from functools import reduce
 from typing import Sequence

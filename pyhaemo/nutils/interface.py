@@ -1,10 +1,10 @@
-from splico.util import np, frozen, _
-from splico.types import NanVec, Immutable, Singleton, Int, lock
-from splico.spl import NDSpline, NDSplineArray, UnivariateKnotVector
-from splico.util import nutils_to_scipy
-from splico.err import DuplicateOrientationError
-from splico._jit import _apply_pairs
-from splico.topo import Topology, as_topo, ZEROTOPO
+from pyhaemo.util import np, frozen, _
+from pyhaemo.types import NanVec, Immutable, Singleton, Int, lock
+from pyhaemo.spl import NDSpline, NDSplineArray, UnivariateKnotVector
+from pyhaemo.util import nutils_to_scipy
+from pyhaemo.err import DuplicateOrientationError
+from pyhaemo._jit import _apply_pairs
+from pyhaemo.topo import Topology, as_topo, ZEROTOPO
 
 from .mul import multipatch, basis_spline
 

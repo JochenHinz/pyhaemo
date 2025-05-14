@@ -1,7 +1,7 @@
-from splico.geo import compute_notwistframe_from_spline, ellipse
-from splico.mesh import rectilinear, mesh_union
-from splico.spl import UnivariateKnotVector
-from splico.util import np, _, clparam
+from pyhaemo.geo import compute_notwistframe_from_spline, ellipse
+from pyhaemo.mesh import rectilinear, mesh_union
+from pyhaemo.spl import UnivariateKnotVector
+from pyhaemo.util import np, _, clparam
 
 
 def main(nelems_centerline, nelems_cross_section, radii, centerline_points):

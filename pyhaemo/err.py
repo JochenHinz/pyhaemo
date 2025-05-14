@@ -4,7 +4,7 @@ Module defining various custom errors.
 """
 
 
-""" For use in splico.mesh.mesh """
+""" For use in pyhaemo.mesh.mesh """
 
 
 class MissingVertexError(Exception):

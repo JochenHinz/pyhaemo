@@ -1,6 +1,6 @@
-from splico.mesh import Mesh
-from splico.mesh.element import POINT, LINE, TRIANGLE, QUADRILATERAL, HEXAHEDRON
-from splico.log import logger as log
+from pyhaemo.mesh import Mesh
+from pyhaemo.mesh.element import POINT, LINE, TRIANGLE, QUADRILATERAL, HEXAHEDRON
+from pyhaemo.log import logger as log
 
 from typing import Optional, Dict, Callable
 

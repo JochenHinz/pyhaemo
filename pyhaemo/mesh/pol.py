@@ -152,7 +152,7 @@ def _compute_basis_weights(mesh: 'Mesh'):
 def _compute_pol_weights(mesh: 'Mesh', dx: Tuple[Int, ...]) -> FloatArray:
   """
   Polynomial weights of each element's map.
-  For `splico.mesh.Mesh.eval_local`.
+  For `pyhaemo.mesh.Mesh.eval_local`.
   """
 
   assert len(dx) == mesh.ndims
@@ -233,11 +233,11 @@ def _eval_nd_polynomial(weights: FloatArray,
 def eval_mesh_local(mesh: 'Mesh', points: FloatArray, dx: Int | AnyIntSeq = ()):
   """
   Evaluate the local element map or one of its local derivatives of all
-  elements corresponding to an instantiation of :class:`splico.mesh.Mesh`.
+  elements corresponding to an instantiation of :class:`pyhaemo.mesh.Mesh`.
 
   Parameters
   ----------
-  mesh : :class:`splico.mesh.Mesh`
+  mesh : :class:`pyhaemo.mesh.Mesh`
       The input mesh.
   points : :class:`np.ndarray`
       The local evaluation points.

@@ -12,6 +12,7 @@ from ..types import Immutable, ensure_same_class, ensure_same_length, Int, \
                     AnySequence, NumericArray, NumpyIndex
 from ..err import EmptyContainerError
 from ..kron import freeze_csr, sparse_kron, KroneckerOperator
+from ..log import logger as log
 from ._jit_spl import nonzero_bsplines_deriv_vectorized, _collocation_matrix
 
 from itertools import starmap, chain
@@ -178,6 +179,9 @@ class UnivariateKnotVector(Immutable):
     abscissae = np.asarray(abscissae, dtype=float)
 
     a, *ignore, b = self.knots
+
+    if np.min(abscissae) < a or np.max(abscissae) > b:
+      log.warning("Collocation points outside knotvector domain.")
 
     args = _collocation_matrix(self.repeated_knots,
                                self.degree,
@@ -445,7 +449,7 @@ def univariate_integral(uknotvector: UnivariateKnotVector, dx: Int = 0) -> spars
 
   # XXX: jit-compile with Numba using COO-format instead of lil.
 
-  maxrep = uknotvector.km[1:-1].max()
+  maxrep = uknotvector.km[1:-1].max() if len(uknotvector.knots) > 2 else 0
   assert uknotvector.degree >= dx and maxrep <= uknotvector.degree + 1 - dx
 
   knots, ext_knots = uknotvector.knots, uknotvector.repeated_knots

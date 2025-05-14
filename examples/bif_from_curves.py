@@ -1,7 +1,7 @@
-from splico.util import np, _
-from splico.spl import NDSpline, NDSplineArray
-from splico.geo import bif_from_curves, repeated_knot_disc
-from splico.geo.interp import cubic_hermite_interpolation
+from pyhaemo.util import np, _
+from pyhaemo.spl import NDSpline, NDSplineArray
+from pyhaemo.geo import bif_from_curves, repeated_knot_disc
+from pyhaemo.geo.interp import cubic_hermite_interpolation
 
 
 def rotmat(theta):

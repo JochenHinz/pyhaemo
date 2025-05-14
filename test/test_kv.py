@@ -1,4 +1,4 @@
-from splico.spl import UnivariateKnotVector, TensorKnotVector, NDSpline
+from pyhaemo.spl import UnivariateKnotVector, TensorKnotVector, NDSpline
 
 import unittest
 

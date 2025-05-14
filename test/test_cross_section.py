@@ -1,5 +1,5 @@
-from splico.geo import ellipse
-from splico.mesh import rectilinear, mesh_union
+from pyhaemo.geo import ellipse
+from pyhaemo.mesh import rectilinear, mesh_union
 
 import unittest
 

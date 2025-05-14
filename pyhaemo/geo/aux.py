@@ -4,7 +4,7 @@ Auxiliary functionality for the geo module.
 @author: Jochen Hinz
 """
 
-from splico.spl import NDSpline, NDSplineArray
+from pyhaemo.spl import NDSpline, NDSplineArray
 
 
 from typing import Callable
@@ -20,9 +20,9 @@ to_NDSplineArray = lambda x: NDSplineArray(x) if isinstance(x, NDSpline) else x
 
 def spline_or_array(f: Callable) -> Callable:
   """
-  Decorator for functions that can either take :class:`splico.spl.NDSpline`
-  or :class:`splico.spl.NDSplineArray` inputs. The function is then called
-  with the input converted to a :class:`splico.spl.NDSplineArray` and the output
+  Decorator for functions that can either take :class:`pyhaemo.spl.NDSpline`
+  or :class:`pyhaemo.spl.NDSplineArray` inputs. The function is then called
+  with the input converted to a :class:`pyhaemo.spl.NDSplineArray` and the output
   is converted back to :class:`NDSpline` if all inputs were of this type.
   """
 

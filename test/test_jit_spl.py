@@ -1,6 +1,6 @@
-from splico.spl import UnivariateKnotVector, TensorKnotVector
-from splico.spl import NDSpline
-from splico.spl._jit_spl import position_in_knotvector, position_in_knotvector_trunc
+from pyhaemo.spl import UnivariateKnotVector, TensorKnotVector
+from pyhaemo.spl import NDSpline
+from pyhaemo.spl._jit_spl import position_in_knotvector, position_in_knotvector_trunc
 
 import unittest
 
@@ -9,7 +9,7 @@ import numpy as np
 
 class TestJIT(unittest.TestCase):
   """
-  Test the JIT compiled helper routines from the `splico.spl._jit_spl` module.
+  Test the JIT compiled helper routines from the `pyhaemo.spl._jit_spl` module.
   """
   def test_position_in_knotvector(self):
     kv = UnivariateKnotVector(np.linspace(0, 1, 11), 3)

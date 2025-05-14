@@ -1,6 +1,6 @@
-from splico.util import np, _
-from splico.spl import UnivariateKnotVector
-from splico._jit import _apply_pairs
+from pyhaemo.util import np, _
+from pyhaemo.spl import UnivariateKnotVector
+from pyhaemo._jit import _apply_pairs
 
 import itertools
 from typing import Tuple, Dict, List

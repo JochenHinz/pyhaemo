@@ -4,8 +4,8 @@ Module for spline interpolation. Either linear or higher order interpolation.
 @author: Jochen Hinz
 """
 
-from splico.spl import NDSplineArray, UnivariateKnotVector
-from splico.types import Int
+from pyhaemo.spl import NDSplineArray, UnivariateKnotVector
+from pyhaemo.types import Int
 from ..util import np
 from .aux import spline_or_array
 
@@ -21,9 +21,9 @@ def linear_interpolation(spl0: NDSplineArray,
 
   Parameters
   ----------
-  spl0 : :class:`splico.spl.NDSpline` or :class:`splico.spl.NDSplineArray`
+  spl0 : :class:`pyhaemo.spl.NDSpline` or :class:`pyhaemo.spl.NDSplineArray`
       The first input spline.
-  spl1 : :class:`splico.spl.NDSpline` or :class:`splico.spl.NDSplineArray`
+  spl1 : :class:`pyhaemo.spl.NDSpline` or :class:`pyhaemo.spl.NDSplineArray`
       The second input spline.
   kvz : :class:`int` or class:`UnivariateKnotVector`
       The spline basis order in the xn+1-direction. Must be >= 1.
@@ -32,7 +32,7 @@ def linear_interpolation(spl0: NDSplineArray,
 
   Returns
   -------
-  spl : :class:`splico.spl.NDSpline`
+  spl : :class:`pyhaemo.spl.NDSpline`
       The resulting linearly interpolated spline satisfying
       `spl.nvars == spl0.nvars + 1`.
   """
@@ -66,9 +66,9 @@ def cubic_hermite_interpolation(spl0: NDSplineArray,
 
   Parameters
   ----------
-  spl0 : :class:`splico.spl.NDSpline` or :class:`splico.spl.NDSplineArray`
+  spl0 : :class:`pyhaemo.spl.NDSpline` or :class:`pyhaemo.spl.NDSplineArray`
       The first input spline.
-  spl1 : :class:`splico.spl.NDSpline` or :class:`splico.spl.NDSplineArray`
+  spl1 : :class:`pyhaemo.spl.NDSpline` or :class:`pyhaemo.spl.NDSplineArray`
       The second input spline.
   t0 : :class:`np.ndarray` or :class:`NDSplineArray`
       The desired tangent at xn+1 == 0.
@@ -81,7 +81,7 @@ def cubic_hermite_interpolation(spl0: NDSplineArray,
 
   Returns
   -------
-  spl : :class:`splico.spl.NDSpline`
+  spl : :class:`pyhaemo.spl.NDSpline`
       The resulting cubic Hermite interpolation spline satisfying
       `spl.nvars == spl0.nvars + 1`.
   """

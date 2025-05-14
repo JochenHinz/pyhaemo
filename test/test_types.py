@@ -1,6 +1,6 @@
-from splico.types import Immutable, ensure_same_class, Singleton
-from splico.mesh import rectilinear
-from splico.err import CannotSetImmutableAttributeError
+from pyhaemo.types import Immutable, ensure_same_class, Singleton
+from pyhaemo.mesh import rectilinear
+from pyhaemo.err import CannotSetImmutableAttributeError
 
 import unittest
 import tempfile

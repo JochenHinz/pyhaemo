@@ -1,5 +1,5 @@
-from splico.mesh import rectilinear, mesh_union
-from splico.mesh.bool import make_matching
+from pyhaemo.mesh import rectilinear, mesh_union
+from pyhaemo.mesh.bool import make_matching
 
 import unittest
 

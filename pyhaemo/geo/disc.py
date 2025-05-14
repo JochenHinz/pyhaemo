@@ -1,8 +1,8 @@
-from splico.util import np, _
-from splico.topo import Topology
-from splico.nutils.mul import multipatch, basis_spline
-from splico.spl import UnivariateKnotVector, NDSpline, NDSplineArray
-from splico.types import Float, Int, Numeric
+from pyhaemo.util import np, _
+from pyhaemo.topo import Topology
+from pyhaemo.nutils.mul import multipatch, basis_spline
+from pyhaemo.spl import UnivariateKnotVector, NDSpline, NDSplineArray
+from pyhaemo.types import Float, Int, Numeric
 
 from itertools import product
 from functools import lru_cache

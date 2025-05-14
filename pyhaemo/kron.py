@@ -14,8 +14,8 @@ tensor-product spline spaces.
 @author: Jochen Hinz
 """
 
-from splico.util import frozen, _round_array
-from splico.types import Int, Immutable
+from pyhaemo.util import frozen, _round_array
+from pyhaemo.types import Int, Immutable
 
 from functools import lru_cache, reduce, wraps
 from collections.abc import Sequence, Hashable

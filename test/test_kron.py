@@ -1,7 +1,7 @@
-from splico.util import np
-from splico.spl.aux import greville_collocation_matrix
-from splico.kron import Matrix, MatMul, KroneckerOperator
-from splico.spl import UnivariateKnotVector
+from pyhaemo.util import np
+from pyhaemo.spl.aux import greville_collocation_matrix
+from pyhaemo.kron import Matrix, MatMul, KroneckerOperator
+from pyhaemo.spl import UnivariateKnotVector
 
 import unittest
 

@@ -1,5 +1,5 @@
 """
-Metaclasses specific to the `splico.spl` package.
+Metaclasses specific to the `pyhaemo.spl` package.
 @author: Jochen Hinz
 """
 
@@ -10,7 +10,7 @@ class NDSplineMeta(ImmutableMeta):
   """
   Metaclass for the NDSpline class.
   Is equivalent to :type:`ImmutableMeta` but automatically inherits a number
-  of functions from :class:`splico.spl.TensorKnotVector` that create a new
+  of functions from :class:`pyhaemo.spl.TensorKnotVector` that create a new
   knotvector.
   The spline is then automatically prolonged to the newly created knotvector.
   Similarly, a number of properties are inherited. They can then directly be

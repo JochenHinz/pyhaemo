@@ -1,5 +1,5 @@
 [project]
-name = "splico"
+name = "pyhaemo"
 readme = "README.md"
 authors = [
     { name = "Jochen Hinz", email = "jochen.hinz@epfl.ch" },

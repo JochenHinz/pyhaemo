@@ -1,13 +1,13 @@
 from .util import all_permutations, tuple_convert
-from splico.types import Immutable, Int, lock
-from splico.util import np, frozen
-from splico.err import DuplicateOrientationError
+from pyhaemo.types import Immutable, Int, lock
+from pyhaemo.util import np, frozen
+from pyhaemo.err import DuplicateOrientationError
 
 from itertools import product
 from functools import lru_cache, cached_property
 from typing import Tuple, Self
 
-from numpy.typing import NDArray, ArrayLike
+from numpy.typing import ArrayLike
 from matplotlib import pyplot as plt
 import networkx
 

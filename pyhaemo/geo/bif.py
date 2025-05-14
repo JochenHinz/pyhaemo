@@ -1,12 +1,12 @@
-from splico.util import np, _
-from splico.types import Int, Float, Numeric
-from splico.util import normalize
-from splico.spl import NDSplineArray, NDSpline, UnivariateKnotVector, \
-                       TensorKnotVector
-from splico.geo.disc import PATCHES, ellipse
-from splico.geo.interp import cubic_hermite_interpolation
-from splico.geo.aux import spline_or_array
-from splico.nutils import NutilsInterface
+from pyhaemo.util import np, _
+from pyhaemo.types import Int, Float, Numeric
+from pyhaemo.util import normalize
+from pyhaemo.spl import NDSplineArray, NDSpline, UnivariateKnotVector, \
+                        TensorKnotVector
+from pyhaemo.geo.disc import PATCHES, ellipse
+from pyhaemo.geo.interp import cubic_hermite_interpolation
+from pyhaemo.geo.aux import spline_or_array
+from pyhaemo.nutils import NutilsInterface
 
 from functools import lru_cache
 from collections import namedtuple

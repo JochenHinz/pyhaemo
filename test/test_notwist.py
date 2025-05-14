@@ -1,7 +1,7 @@
-from splico.geo import ellipse, compute_notwistframe_from_spline
-from splico.mesh import rectilinear, mesh_union
-from splico.spl import UnivariateKnotVector, TensorKnotVector
-from splico.util import np, _
+from pyhaemo.geo import ellipse, compute_notwistframe_from_spline
+from pyhaemo.mesh import rectilinear, mesh_union
+from pyhaemo.spl import UnivariateKnotVector, TensorKnotVector
+from pyhaemo.util import np, _
 
 import unittest
 

@@ -16,7 +16,7 @@ and JIT compilation in Numba.
 
 While we currently discourage classes that forgo the advantages of immutability,
 more permissive design patterns may be introduced in the future.
-An example of this is the `splico.spl.NDSpline` class which may permit inplace
+An example of this is the `pyhaemo.spl.NDSpline` class which may permit inplace
 modifications to enhance interoperability with the Numpy API in the future.
 
 @author: Jochen Hinz
@@ -141,8 +141,8 @@ def is_valid_signature(signature: Signature) -> bool:
 
 
 # Metaclasses and various base classes forming the core of most of the
-# library's class structure, in particular the `splico.mesh.Mesh` and
-# the `splico.spl.NDSpline` base class.
+# library's class structure, in particular the `pyhaemo.mesh.Mesh` and
+# the `pyhaemo.spl.NDSpline` base class.
 
 
 Im = TypeVar('Im', bound='Immutable')

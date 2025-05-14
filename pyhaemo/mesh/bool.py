@@ -36,9 +36,9 @@ def _issubmesh(mesh0: 'Mesh', mesh1: 'Mesh') -> bool:
 
   Parameters
   ----------
-  mesh0 : :class:`splico.mesh.Mesh`
+  mesh0 : :class:`pyhaemo.mesh.Mesh`
       The submesh candidate.
-  mesh1 : :class:`splico.mesh.Mesh`
+  mesh1 : :class:`pyhaemo.mesh.Mesh`
       The mesh we check if `mesh0` is a submesh of.
 
   Returns
@@ -92,7 +92,7 @@ def mesh_union_depr(*meshes: 'Mesh') -> 'Mesh':
   Duplicate points and elements are detected using a hashmap. Therefore only
   points that match exactly are treated as equal.
   Very sensitive to numerical round-off errors. To reduce sensitivity,
-  use in combination with the ``splico.util.global_precision`` context manager.
+  use in combination with the ``pyhaemo.util.global_precision`` context manager.
   """
   log.warning("This function is deprecated and will be removed in the future.")
 
@@ -216,7 +216,7 @@ def mesh_union(*meshes: 'Mesh', eps: float = 1e-6,
 
   Parameters
   ----------
-  meshes : :class:`splico.mesh.Mesh`
+  meshes : :class:`pyhaemo.mesh.Mesh`
       The input meshes. All need to be of the same type.
   eps: :class:`float`
       Matching tolerance that is forwarded to ``_match_active``.
@@ -232,7 +232,7 @@ def mesh_union(*meshes: 'Mesh', eps: float = 1e-6,
 
   Returns
   -------
-  union : :class:`splico.mesh.Mesh`
+  union : :class:`pyhaemo.mesh.Mesh`
       The union of all input meshes.
   matches : :class:`np.ndarray`
       The matched vertex pairs. Only returned if ``return_matches`` is

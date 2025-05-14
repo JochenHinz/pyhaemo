@@ -1,4 +1,4 @@
-from splico.util import np, _, frozen
+from pyhaemo.util import np, _, frozen
 
 from typing import Tuple
 from itertools import permutations, product

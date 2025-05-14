@@ -5,7 +5,7 @@ Routines dedicated to refining various mesh types.
 
 
 from ..util import np
-from .._jit import product, arange_product, ravel_multi_index, mul_reduce, float2str, multiply
+from .._jit import product, arange_product, ravel_multi_index, float2str, multiply
 
 from functools import lru_cache
 from itertools import count

@@ -1,6 +1,6 @@
-from splico.mesh import Mesh, rectilinear, Triangulation, mesh_union, PointMesh, \
-                        LineMesh
-from splico.util import global_precision
+from pyhaemo.mesh import Mesh, rectilinear, Triangulation, mesh_union, PointMesh, \
+                         LineMesh
+from pyhaemo.util import global_precision
 
 import unittest
 from itertools import product
@@ -139,7 +139,7 @@ class TestSubMesh(unittest.TestCase):
     for i in range(3):
       mesh = mesh.submesh
       self.assertTrue(mesh.is_valid())
-    from splico.err import HasNoSubMeshError
+    from pyhaemo.err import HasNoSubMeshError
     with self.assertRaises(HasNoSubMeshError):
       mesh.submesh
 

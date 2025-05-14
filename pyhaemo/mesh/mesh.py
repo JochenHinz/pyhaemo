@@ -35,8 +35,8 @@ from itertools import product
 
 
 # XXX: `np.ndarray` instance attributes are rounded to the environment
-#      precision `splico.util.GLOBAL_PRECISION` which can be locally adjusted
-#      using the `splico.util.global_precision` context manager.
+#      precision `pyhaemo.util.GLOBAL_PRECISION` which can be locally adjusted
+#      using the `pyhaemo.util.global_precision` context manager.
 #      This is to enhance the robustness of point coordinate-based boolean
 #      operations. The rounding makes a copy of the array which may not be
 #      necessary in all cases but is kept for now or the sake of robustness.
@@ -606,7 +606,7 @@ class Triangulation(AffineMesh):
   @classmethod
   def from_polygon(cls, *args, **kwargs):
     """ See the docstring of `triangulation_from_polygon.` """
-    from splico.mesh._gmsh import triangulation_from_polygon
+    from pyhaemo.mesh._gmsh import triangulation_from_polygon
     return cls(*triangulation_from_polygon(*args, **kwargs))
 
   @property

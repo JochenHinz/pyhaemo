@@ -1,9 +1,8 @@
-from splico.util import _
-from splico.spl import UnivariateKnotVector, TensorKnotVector
-from splico.mesh import rectilinear
-from splico.geo import ellipse
-from splico.spl import NDSpline, NDSplineArray
-from splico.spl._jit_spl import position_in_knotvector
+from pyhaemo.util import _
+from pyhaemo.spl import UnivariateKnotVector, TensorKnotVector
+from pyhaemo.mesh import rectilinear
+from pyhaemo.geo import ellipse
+from pyhaemo.spl import NDSpline, NDSplineArray
 
 import operator
 import unittest
@@ -189,6 +188,18 @@ class TestNDSpline(unittest.TestCase):
 
     # make sure the spl with raised multiplicities is the same as the joined spl
     self.assertTrue(np.allclose(spl.controlpoints, spl_.controlpoints))
+
+  def test_split_join_by_xvals(self):
+    kv = UnivariateKnotVector(np.linspace(0, 1, 14), 3).to_tensor()
+    spl = NDSpline(kv, np.random.randn(kv.ndofs, 3))
+
+    # give him value that reaches machine precision
+    # should be rounded to the global precision
+    spl0, spl1 = spl.split( 0, xvals=[1/3] )
+    spl = spl.add_knots(0, knotvalues=[1/3]).raise_multiplicities(0, positions=[5], amounts=[3])
+
+    self.assertTrue( np.allclose(np.concatenate([spl0.controlpoints, spl1.controlpoints], axis=0),
+                                 spl.controlpoints) )
 
   def test_split_join_multiple(self):
     kv = UnivariateKnotVector(np.linspace(0, 1, 11), 3).to_tensor()

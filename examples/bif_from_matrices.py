@@ -1,10 +1,10 @@
-from splico.geo.interp import cubic_hermite_interpolation
-from splico.geo import compute_notwistframe
-from splico.types import Int
-from splico.mesh import mesh_union
-from splico.spl import UnivariateKnotVector, TensorKnotVector, NDSplineArray, NDSpline
-from splico.util import np, _, clparam, normalize
-from splico.geo.bif import repeated_knot_disc, bif_from_matrices
+from pyhaemo.geo.interp import cubic_hermite_interpolation
+from pyhaemo.geo import compute_notwistframe
+from pyhaemo.types import Int
+from pyhaemo.mesh import mesh_union
+from pyhaemo.spl import UnivariateKnotVector, TensorKnotVector, NDSplineArray, NDSpline
+from pyhaemo.util import np, _, clparam, normalize
+from pyhaemo.geo.bif import repeated_knot_disc, bif_from_matrices
 
 from typing import Sequence
 from functools import partial
@@ -118,11 +118,11 @@ if __name__ == '__main__':
                                         np.array([-1, 0, 0]))(xi)[::-1]
 
   angle = 2 / 3 * np.pi
-  rotmat = np.array([[np.cos(angle), -np.sin(angle), 0],
-                     [np.sin(angle), np.cos(angle), 0],
-                     [0, 0, 1]])
+  rotxy = lambda angle: np.array([[np.cos(angle), -np.sin(angle), 0],
+                                  [np.sin(angle), np.cos(angle), 0],
+                                  [0, 0, 1]])
 
-  points1 = (rotmat @ points0.T).T
-  points2 = (rotmat @ points1.T).T
+  points1 = (rotxy(angle) @ points0.T).T
+  points2 = (rotxy(angle + 0.9) @ points1.T).T
 
   main(30, 4, [points0, points1, points2], [.5 * eps * np.ones(npoints)]*3)

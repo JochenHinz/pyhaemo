@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 
 def plot_mesh(mesh: 'Mesh'):
+
   nelems = len(mesh.elements)
   cell_type = { 'point': vtk.VTK_POINTS,
                 'line': vtk.VTK_LINE,

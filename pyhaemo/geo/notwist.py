@@ -1,5 +1,5 @@
-from splico.util import np, normalize, isincreasing
-from splico.spl import NDSpline
+from pyhaemo.util import np, normalize, isincreasing
+from pyhaemo.spl import NDSpline
 
 from typing import Optional, Sequence
 
@@ -103,7 +103,7 @@ def compute_notwistframe_from_spline(spline: NDSpline,
 
     Parameters
     ----------
-    spline : :class:`splico.spl.NDSpline`
+    spline : :class:`pyhaemo.spl.NDSpline`
         The input spline. Must satisfy spline.shape == (3,) and spline.nvars == 1.
     abscissae : :class:`np.ndarray` or Sequence[float] or :class:`int`
         A strictly monotone sequence of parametric values. If passed as an integer,
@@ -115,12 +115,12 @@ def compute_notwistframe_from_spline(spline: NDSpline,
     framekwargs : :class:`dict`, optional
         Keyword arguments that are forwarded to `compute_notwistframe`.
     refitkwargs : :class:`dict`, optional
-        Keyword arguments that are forwarded to `splico.spl.TensorKnotVector.fit`.
+        Keyword arguments that are forwarded to `pyhaemo.spl.TensorKnotVector.fit`.
 
     Returns
     -------
 
-    Rs : :class:`np.ndarray` or :class:`splico.spl.NDSpline`
+    Rs : :class:`np.ndarray` or :class:`pyhaemo.spl.NDSpline`
         The discrete no-twist-frame or a spline fit of it if `refit` is `True`.
   """
 

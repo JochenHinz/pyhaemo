@@ -1,9 +1,9 @@
-from splico.nutils.interface import NutilsInterface
-from splico.topo import Topology
-from splico.geo.disc import ellipse, PATCHES
-from splico.spl import NDSplineArray
-from splico.geo.interp import linear_interpolation
-from splico.err import DuplicateOrientationError
+from pyhaemo.nutils.interface import NutilsInterface
+from pyhaemo.topo import Topology
+from pyhaemo.geo.disc import ellipse, PATCHES
+from pyhaemo.spl import NDSplineArray
+from pyhaemo.geo.interp import linear_interpolation
+from pyhaemo.err import DuplicateOrientationError
 
 import unittest
 

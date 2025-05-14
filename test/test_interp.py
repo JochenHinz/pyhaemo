@@ -1,10 +1,10 @@
-from splico.geo import ellipse
-from splico.geo.interp import linear_interpolation, cubic_hermite_interpolation
-from splico.mesh import rectilinear, mesh_union
-from splico.util import np
-from splico.nutils import NutilsInterface
-from splico.geo.disc import PATCHES
-from splico.spl import NDSplineArray, NDSpline
+from pyhaemo.geo import ellipse
+from pyhaemo.geo.interp import linear_interpolation, cubic_hermite_interpolation
+from pyhaemo.mesh import rectilinear, mesh_union
+from pyhaemo.util import np
+from pyhaemo.nutils import NutilsInterface
+from pyhaemo.geo.disc import PATCHES
+from pyhaemo.spl import NDSplineArray, NDSpline
 
 import unittest
 from itertools import starmap

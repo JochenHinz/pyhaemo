@@ -10,7 +10,7 @@ from ..types import Immutable, FloatArray, NumericArray, Float, \
                     AnySequence, NumpyIndex, MultiNumpyIndex, ensure_same_class
 from ..log import logger as log
 from ..kron import KroneckerOperator
-from splico.mesh.mesh import Mesh, rectilinear, mesh_union
+from pyhaemo.mesh.mesh import Mesh, rectilinear, mesh_union
 from ._jit_spl import call
 from .kv import UnivariateKnotVector, TensorKnotVector, as_TensorKnotVector, \
                 KnotVectorType
@@ -230,8 +230,8 @@ class NDSpline(Spline, metaclass=NDSplineMeta):
 
   Parameters
   ----------
-  knotvector : :class:`splico.spl.kv.TensorKnotVector` or
-               :class:`splico.spl.kv.UnivariateKnotVector`
+  knotvector : :class:`pyhaemo.spl.kv.TensorKnotVector` or
+               :class:`pyhaemo.spl.kv.UnivariateKnotVector`
       The (tensorial) knotvector associated with the spline. If not yet
       tensorial, will be converted to tensorial.
   controlpoints : :class:`np.ndarray` or any array-like
@@ -241,14 +241,14 @@ class NDSpline(Spline, metaclass=NDSplineMeta):
       Here, ``self.controlpoints[i]`` denotes the (potentially tensorial)
       control point assigned to the i-th spline function in the basis that
       corresponds to ``self.knotvector``. Is rounded to the current precision
-      as set by the `splico.util.global_precision` context manager and then
+      as set by the `pyhaemo.util.global_precision` context manager and then
       frozen. Here, self.controlpoints.shape[1:] can be anything and then
       simply represents a vectorial / tensorial set of splines all with the
       same knotvector.
 
   Attributes
   ----------
-  knotvector: :class:`splico.spl.kv.TensorKnotVector`
+  knotvector: :class:`pyhaemo.spl.kv.TensorKnotVector`
       The knotvector.
   controlpoints: :class:`np.ndarray`
       The controlpoints.
@@ -335,7 +335,7 @@ class NDSpline(Spline, metaclass=NDSplineMeta):
   @staticmethod
   def from_least_squares(knotvector: KnotVectorType, *args, **kwargs):
     """
-    Docstring: see `splico.spl.kv.TensorKnotVector.fit`.
+    Docstring: see `pyhaemo.spl.kv.TensorKnotVector.fit`.
     """
     # Contrary to ``from_exact_interpolation`` this one works for any dimension
     # convert to TensorKnotVector if not alreay
@@ -601,7 +601,7 @@ class NDSpline(Spline, metaclass=NDSplineMeta):
     """
     Same as np.sum but applied to the tail of self.controlpoints.
     >>> type(spl0)
-    ... splico.spl.spline.NDSpline
+    ... pyhaemo.spl.spline.NDSpline
     >>> spl0.shape
     ... (2, 3)
     >>> spl0.controlpoints.shape
@@ -642,7 +642,7 @@ class NDSpline(Spline, metaclass=NDSplineMeta):
 
     Parameters
     ----------
-    mesh : :class:`splico.mesh.Mesh`
+    mesh : :class:`pyhaemo.mesh.Mesh`
       The mesh's points serve as the evaluation points to `self` for sampling
       a mesh from a spline with target space R^3. The connectivity, elements
       and element types of the sampled mesh follow directly from `mesh`.
@@ -658,7 +658,7 @@ class NDSpline(Spline, metaclass=NDSplineMeta):
 
     Returns
     -------
-    sampled_mesh: :class:`splico.mesh.Mesh`
+    sampled_mesh: :class:`pyhaemo.mesh.Mesh`
         The sampled mesh resulting from taking the union of all meshes sampled
         from the splines in self.shape[:-1].
     """
@@ -738,6 +738,7 @@ class NDSpline(Spline, metaclass=NDSplineMeta):
         "Exactly one of `positions` and `xvals` must be given."
 
     if xvals is not None:
+      xvals = _round_array(xvals)
       self = self.add_knots(direction, knotvalues=[xvals])
       positions = np.searchsorted(self.knots[direction], np.asarray(xvals))
       return self.split(direction, positions=positions)

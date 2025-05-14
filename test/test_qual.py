@@ -5,8 +5,8 @@
 @author: Fabio Marcinno'
 """
 
-from splico.mesh.qual import aspect_ratio
-from splico.mesh import rectilinear
+from pyhaemo.mesh.qual import aspect_ratio
+from pyhaemo.mesh import rectilinear
 from test_mesh import unit_disc_triangulation
 import unittest
 
