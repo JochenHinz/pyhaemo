@@ -1,5 +1,5 @@
-from splico.util import np, normalize, isincreasing, _
-from splico.spl import NDSpline
+from pyhaemo.util import np, normalize, isincreasing, _
+from pyhaemo.spl import NDSpline
 
 from typing import Optional, Sequence
 
@@ -57,7 +57,7 @@ def _compute_notwistframe(T, n0, zero_thresh):
       normal = Rs[i-1][:, 0]
     else:
       omega = omega / norm
-      phi = np.arccos(np.dot(told, tnew))
+      phi = np.arccos(max(-1, min(np.dot(told, tnew), 1)))
 
       binormal_p = Rs[i-1][:, 1]
       binormal = binormal_p * np.cos(phi) + \
@@ -157,8 +157,7 @@ def _compute_notwistframe_end_to_end(T, n0, nfinal, zero_thresh):
   # express the final normal in the local coordinate system
   nfinal_loc = np.linalg.solve(Rs_forward[-1], nfinal)
 
-  # should be orthogonal so the component in the t-direction is 0
-  assert np.allcloase(np.abs(nfinal_loc[-1]), 0)
+  assert np.allclose(np.abs(nfinal_loc[-1]), 0)
 
   # compute the angle between the two local normals on the last section
   # between (-pi, pi]
@@ -199,12 +198,13 @@ def compute_notwistframe(tangents: np.ndarray,
   assert (tangents := normalize(tangents)).shape[1:] == (3,)
   assert zero_thresh >= 0
 
-  if n0 is None:
+  if n0 is None and nfinal is None:
     n0 = np.array([-tangents[0, 2], 0, tangents[0, 0]])
+    return _compute_notwistframe(tangents, n0, zero_thresh)
 
-  assert (n0 := np.asarray(n0)).shape == (3,)
-
-  if nfinal is None:
+  elif n0 is None:
+    return _compute_notwistframe(tangents[::-1], nfinal, zero_thresh)[::-1]
+  elif nfinal is None:
     return _compute_notwistframe(tangents, n0, zero_thresh)
   else:  # bif to bif tract
     assert (nfinal := np.asarray(nfinal)).shape == (3,)

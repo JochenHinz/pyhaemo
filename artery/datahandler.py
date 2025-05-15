@@ -1,12 +1,164 @@
-from pyhaemo.util import np
-from pyhaemo.util import clparam as chord_length
-from pyhaemo.spl import UnivariateKnotVector
+from pyhaemo.util import np, clparam
+from pyhaemo.spl import UnivariateKnotVector, TensorKnotVector, NDSpline
 
 import warnings
 from typing import Literal
 
+from scipy import sparse
+from numpy.typing import NDArray
+
 
 FORMAT = 'csv', 'swc'
+
+
+def solve_with_dirichlet_data(A, rhs, freezeindices, data, **kwargs):
+
+  if not sparse.isspmatrix(A):
+    A = sparse.csr_matrix(A)
+
+  N = len(rhs)
+  assert A.shape == (N, N)
+
+  # convert the full rhs vector (i.e., the one that is tested against ALL test functions)
+  # to an np.ndarray if not already.
+  rhs = np.asarray(rhs)
+
+  assert rhs.ndim in (1, 2)
+  assert freezeindices.ndim == 1 and len(freezeindices) == data.shape[0]
+  assert data.shape[1:] == rhs.shape[1:]
+
+  freezemask = np.zeros(N, dtype=bool)
+  freezemask[freezeindices] = True
+  freemask = ~freezemask
+
+  cons = np.zeros(rhs.shape)
+  cons[freezeindices] = data
+
+  rhs = (rhs - A @ cons)[freemask]
+
+  A = A.tolil()[freemask][:, freemask].tocsr()
+
+  # solve for u_0
+  sol = sparse.linalg.spsolve(A, rhs, **kwargs)
+
+  # cons is equal to the imposed Dirichlet data on the freezeindices
+  # setting cons[dofindices] = sol will create a vector that is equal to
+  # the Dirichlet data on the freezeindices and to u_0 on the dofindices.
+  cons[freemask] = sol
+
+  # return the result as an ordinary np.ndarray
+  return cons
+
+
+def fit_constrained(kv: TensorKnotVector, absc: NDArray, data, lam0=1e-5, lam1=0):
+
+  assert len(kv) == 1, NotImplementedError
+  absc = np.asarray(absc, dtype=float)
+
+  assert all(lam >= 0 for lam in (lam0, lam1))
+
+  X, = kv.collocate(absc)
+  M = X @ X.T
+
+  if any( (lam0, lam1) ):
+    if lam0 != 0:
+      M += lam0 * kv.A
+    if lam1 != 0:
+      M += lam1 * kv.D
+
+  _data = data.reshape((-1,) + (data.shape[1:] and (np.prod(data.shape[1:]),)))
+  rhs = X @ _data
+
+  freezeindices = np.array([0, 1, kv.ndofs-2, kv.ndofs-1], dtype=int)
+  freeze_data = np.empty((len(freezeindices),) + _data.shape[1:])
+
+  knots, = kv.knots
+  p, = kv.degree
+
+  t0 = (_data[1] - _data[0]) / (absc[1] - absc[0])
+  t1 = (_data[-1] - _data[-2]) / (absc[-1] - absc[-2])
+
+  freeze_data[0] = _data[0]
+  freeze_data[1] = _data[0] + t0 * (knots[1] - knots[0]) / p
+
+  freeze_data[-2] = _data[-1] - t1 * (knots[-1] - knots[-2]) / p
+  freeze_data[-1] = _data[-1]
+
+  controlpoints = solve_with_dirichlet_data(M, rhs, freezeindices, freeze_data)
+
+  assert np.allclose(controlpoints[0], _data[0])
+  assert np.allclose(controlpoints[-1], _data[-1])
+
+  return NDSpline(kv, controlpoints.reshape(-1, *data.shape[1:]))
+
+
+def process_input(filename: str, format: Literal[FORMAT]):
+    """
+    Processes the input file based on the specified format.
+
+    Args:
+        filename (str): The path to the input file. It will be
+        stripped of leading and trailing whitespace.
+        format (Literal[FORMAT]): The format of the input file.
+        Must be one of the predefined formats in FORMAT.
+
+    Raises:
+        NotImplementedError: If the specified format is not supported.
+    """
+    filename = str(filename).strip()
+
+    if format not in FORMAT:
+        raise NotImplementedError(f'Not implemented for format: {format}')
+
+
+def data_extraction(data):
+    """
+    Extracts centerline and radius data from the input array.
+
+    Args:
+        data (numpy.ndarray): The input data array with centerline
+                              and radius information.
+
+    Returns:
+        tuple: A tuple containing the centerline and radius arrays.
+    """
+    centerline = data[:, :3]
+    radius = data[:, -1]
+
+    if len(centerline) != len(radius):
+        warnings.warn("The number of points is not equal to radii")
+
+    return centerline, radius
+
+
+def to_spline(centerline, radius, n_points=20, **fitkwargs):
+    """
+    Converts a single centerline and radius into spline representations.
+
+    Args:
+        centerline (numpy.ndarray): The centerline data points.
+        radius (numpy.ndarray): The radius data points.
+        n_points (int): Number of points for the spline representation.
+
+    Returns:
+        tuple: A tuple containing the centerline spline and radius spline.
+    """
+
+    fitkwargs.setdefault('lam0', 1e-2)
+
+    kv_center = UnivariateKnotVector(np.linspace(0, 1, n_points)).to_tensor()
+
+    # Compute the chord length parameter values of the centerline points
+    xi_center = clparam(centerline)
+
+    # Fit a univariate spline to the data
+    centerline_spline = fit_constrained(kv_center, xi_center, centerline, **fitkwargs)
+    radius_spline = fit_constrained(kv_center, xi_center, radius, **fitkwargs)
+
+    # centerline_spline = fit_constrained(kv_center, xi_center, centerline, **fitkwargs)
+    # radius_spline = fit_constrained(kv_center, xi_center, radius, **fitkwargs)
+
+    return centerline_spline, radius_spline
 
 
 def csv_converter(filename: str):
@@ -31,65 +183,142 @@ def csv_converter(filename: str):
     return centerline_spline, radius_spline
 
 
-def data_extraction(data):
+def swc_converter(filename):
     """
-    Extracts centerline and radius data from the input array.
+        Converts an SWC file into a centerline and radius spline representation.
+        The SWC file format contains information about the radius, centerline, and
+        connectivity of a structure in a single file. This function processes the
+        SWC file and extracts the necessary data to represent the structure as
+        centerlines and radii splines.
+        Args:
+            filename (str): The path to the SWC file to be converted.
+        Returns:
+            tuple: A tuple containing:
+                - centerlines_list (list): A list of centerline data extracted from the SWC file.
+                - radii_list (list): A list of radius data corresponding to the centerlines.
+    """
+    process_input(filename, 'swc')
 
+    # all the information has contained in one file in case of swc file
+    points = []
+    parent_map = {}  # To store parent-child relationships
+    centerlines_list = []
+    radii_list = []
+
+    with open(filename, 'r') as f:
+        for row in f:
+
+            col = row.strip().split()
+            if swc_input_check(row, col):
+                continue
+
+            points, parent_map = swc_data_extraction(col, points, parent_map)
+
+    points = np.array(points)
+
+    branches = []
+    branch = []
+    connetivity = []
+    for i in range(2, len(parent_map)):
+        if parent_map[i+1] - parent_map[i] == 1:
+            branch.append(parent_map[i])
+        elif parent_map[i+1] - parent_map[i] != 1:
+            branch.append(parent_map[i])
+            branch.append(i)
+            branches.append(branch)
+            branch = []
+
+    valid_branches = []
+    for i in range(len(branches)):
+        if i % 2 == 0:
+            valid_branches.append((np.array(branches[i])-1).tolist())
+        else:
+            connetivity.append((np.array(branches[i])-1).tolist())
+
+    # Extract the centerline and radius data
+    for i in range(len(valid_branches)):
+        centerline = []
+        radius = []
+        for j in range(len(valid_branches[i])):
+            centerline.append(points[valid_branches[i][j]][:3])
+            radius.append(points[valid_branches[i][j]][3])
+        if i != 0:
+            centerline.insert(0, points[connetivity[i][0]][:3])
+            radius.insert(0, points[connetivity[i][0]][3])
+
+        centerlines_list.append(np.array(centerline))
+        radii_list.append(np.array(radius))
+
+    for i, (centerline, radius) in enumerate(zip(centerlines_list, radii_list)):
+        centerline_spline, radius_spline = to_spline(centerline, radius)
+        centerlines_list[i], radii_list[i] = centerline_spline, radius_spline
+
+    return centerlines_list, radii_list, connetivity
+
+
+def swc_input_check(row, columns):
+    """
+    Validates a row and its corresponding columns from an SWC file.
+    This function performs two checks:
+    1. If the row starts with a '#' character, it is considered a comment and
+       the function returns True to indicate that the current iteration should be skipped.
+    2. If the number of columns in the row is not equal to 7, it raises a ValueError
+       indicating an invalid SWC format.
     Args:
-        data (numpy.ndarray): The input data array with centerline
-                              and radius information.
-
+        row (str): A single line from the SWC file.
+        columns (list): A list of values parsed from the row.
     Returns:
-        tuple: A tuple containing the centerline and radius arrays.
-    """
-    centerline = data[:, :3]
-    radius = data[:, -1]
-
-    if len(centerline) != len(radius):
-        warnings.warn("The number of points is not equal to radii")
-
-    return centerline, radius
-
-
-def to_spline(centerline, radius, n_points=100):
-    """
-    Converts a single centerline and radius into spline representations.
-
-    Args:
-        centerline (numpy.ndarray): The centerline data points.
-        radius (numpy.ndarray): The radius data points.
-        n_points (int): Number of points for the spline representation.
-
-    Returns:
-        tuple: A tuple containing the centerline spline and radius spline.
-    """
-    kv_center = UnivariateKnotVector(np.linspace(0, 1, n_points)).to_tensor()
-
-    # Compute the chord length parameter values of the centerline points
-    xi_center = chord_length(centerline)
-    xi_radius = chord_length(radius)
-
-    # Fit a univariate spline to the data
-    centerline_spline = kv_center.fit([xi_center], centerline)
-    radius_spline = kv_center.fit([xi_radius], radius)
-
-    return centerline_spline, radius_spline
-
-
-def process_input(filename: str, format: Literal[FORMAT]):
-    """
-    Processes the input file based on the specified format.
-
-    Args:
-        filename (str): The path to the input file. It will be
-        stripped of leading and trailing whitespace.
-        format (Literal[FORMAT]): The format of the input file.
-        Must be one of the predefined formats in FORMAT.
-
+        bool: True if the row should be skipped (e.g., it's a comment),
+              False if the row passes validation and can be processed.
     Raises:
-        NotImplementedError: If the specified format is not supported.
+        ValueError: If the number of columns is not equal to 7.
     """
-    filename = str(filename).strip()
 
-    if format not in FORMAT:
-        raise NotImplementedError(f'Not implemented for format: {format}')
+    # Check if row starts with '#', which will indicate to skip the current iteration
+    if row.startswith('#'):
+        return True  # Indicating to continue
+
+    # Check if column length is invalid
+    if len(columns) != 7:
+        raise ValueError("Invalid SWC format.")
+
+    return False  # No issues, proceed with the iteration
+
+
+def swc_data_extraction(col, points, parent_map):
+    """
+    Extracts data from a single row of SWC file format and
+    updates the points and parent_map dictionaries.
+    Parameters:
+        col (list): A list representing a row of SWC data. Expected to contain:
+            col[0] (int): Node ID.
+            col[2] (float): X-coordinate of the node.
+            col[3] (float): Y-coordinate of the node.
+            col[4] (float): Z-coordinate of the node.
+            col[5] (float): Radius of the node.
+            col[6] (int): Parent node ID.
+        points (dict): A dictionary to store node data, where the
+                      key is the node ID and the value is a tuple
+                    containing the coordinates ([x, y, z]) and the radius.
+        parent_map (dict): A dictionary to store the parent-child
+                        relationships, where the key is the node ID
+                        and the value is the parent node ID.
+    Returns:
+        tuple: A tuple containing:
+            - points (dict): Updated dictionary with node data.
+            - parent_map (dict): Updated dictionary with
+                                parent-child relationships.
+    """
+
+    # Extract the relevant data
+    node_id = int(col[0])
+    x = float(col[2])
+    y = float(col[3])
+    z = float(col[4])
+    radius = float(col[5])
+    parent_id = int(col[6])
+
+    points.append([x, y, z, radius])
+    parent_map[node_id] = parent_id  # Store the parent ID for each node.
+
+    return points, parent_map

@@ -1,14 +1,14 @@
-from pyhaemo.util import np, _
+from pyhaemo.util import np, _, normalize
 from pyhaemo.mesh import rectilinear, LineMesh, mesh_union
 from pyhaemo.geo import ellipse
-from aux import compute_bif_input
+from pyhaemo.log import logger as log
+from aux import compute_bif_input, compute_orientation
 
 import pyvista as pv
 import vtk
 
 
 def pyvista_mesh(mesh):
-
   nelems = len(mesh.elements)
   cell_type = { 'point': vtk.VTK_POINTS,
                 'line': vtk.VTK_LINE,
@@ -38,7 +38,6 @@ def line_element(mesh: LineMesh):
 
 
 def plot_artery(artery, npoints=1001, plotter=None, show=True):
-
   if plotter is None:
     plotter = pv.Plotter()
 
@@ -50,7 +49,10 @@ def plot_artery(artery, npoints=1001, plotter=None, show=True):
     plotter.add_mesh(lmesh, color="blue", line_width=3, label=str(i))
 
     point_cloud = pv.PolyData( centerline(centerline.knots[0][[0, -1]]) )
-    plotter.add_mesh(point_cloud, color="red", point_size=10, render_points_as_spheres=True, label="Points")
+    plotter.add_mesh(point_cloud, color="red",
+                                  point_size=10,
+                                  render_points_as_spheres=True,
+                                  label="Points")
 
   xi = np.linspace(0, 1, npoints)
 
@@ -68,16 +70,19 @@ def plot_artery(artery, npoints=1001, plotter=None, show=True):
 
     cpoint = sum(points) / len(points)
 
-    for point in points:
-      lmesh = rectilinear( [npoints] )._edit(points=cpoint[_] * xi[:, _] + point[_] * (1 - xi[:, _]))
-      lmesh = line_element(lmesh)
-      plotter.add_mesh(lmesh, color="black", line_width=3, label=str(i))
+    try:
+      for point in points:
+        lmesh = rectilinear( [npoints] )._edit(points=cpoint[_] * xi[:, _] + point[_] * (1 - xi[:, _]))
+        lmesh = line_element(lmesh)
+        plotter.add_mesh(lmesh, color="black", line_width=3, label=str(i))
 
-    point_cloud = pv.PolyData([cpoint])
-    plotter.add_mesh(point_cloud, color="yellow",
-                                  point_size=10,
-                                  render_points_as_spheres=True,
-                                  label="Bifurcation")
+      point_cloud = pv.PolyData([cpoint])
+      plotter.add_mesh(point_cloud, color="yellow",
+                                    point_size=10,
+                                    render_points_as_spheres=True,
+                                    label="Bifurcation")
+    except Exception as e:
+      log.warning(f"Could not plot bifurcation {ibif} with exception {e}")
 
   plotter.add_legend()
   if show:
@@ -88,20 +93,49 @@ def plot_artery(artery, npoints=1001, plotter=None, show=True):
 
 def plot_frames(artery):
   npoints = 4
-  frames_ccw, points_ccw, tangents_ccw, bif_ccw = compute_bif_input(artery)
+  bifs = compute_bif_input(artery)
 
   cross = mesh_union(*ellipse(1, 1, npoints).quick_sample((4, 4)))
   meshes = []
 
-  for bifpoints, bifframe, bifindices in zip(points_ccw, frames_ccw, bif_ccw):
-    for point, frame, index in zip(bifpoints, bifframe, bifindices):
+  plotter = plot_artery(artery, npoints=1001, plotter=None, show=False)
+
+  for i, bif in enumerate(bifs):
+    if len(bif) < 3:
+      continue
+    mypoints = []
+    for j, (point, frame, index) in enumerate(zip(bif.points,
+                                                  bif.compute_frames(),
+                                                  bif.indices)):
       rad = artery.radii[abs(index)-1]
+      cline = artery.centerlines[abs(index)-1]
       myradius = rad([rad.knotvector[0].knots[0 if index > 0 else -1]])
+      direction = normalize(cline([cline.knots[0][-1 if index > 0 else 0]], dx=1).ravel())
+
+      arrow = pv.Arrow(start=point,
+                       direction=direction,
+                       scale=max(float(myradius), 0.2))
+      plotter.add_mesh(arrow, color='purple', line_width=1)
+      plotter.add_points(point[_], color='red')
+      plotter.add_point_labels(point[_], [str(j)])
+
       mesh = cross._edit(points=cross.points @ (frame.T * myradius) + point)
       meshes.append(mesh)
 
+      for color, vec in zip(['red', 'blue', 'green'], frame.T):
+        arrow = pv.Arrow(start=point, direction=vec, scale=float(myradius))
+        plotter.add_mesh(arrow, color=color, line_width=1, label="Frame")
+
+      mypoints.append(point)
+    centerpoint = sum(mypoints) / len(mypoints)
+    plotter.add_points(centerpoint[_], color='red')
+    plotter.add_point_labels(centerpoint[_], [str(i)])
+    normal = pv.Arrow(start=centerpoint,
+                      direction=bif.normal,
+                      scale=0.3)
+    plotter.add_mesh(normal, color='black', line_width=1, label="Normal")
+
   final_mesh = mesh_union(*meshes)
-  plotter = plot_artery(artery, npoints=1001, plotter=None, show=False)
 
   plotter.add_mesh(pyvista_mesh(final_mesh), color='tan', line_width=1, show_edges=True)
   plotter.show()

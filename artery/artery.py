@@ -1,25 +1,23 @@
-from pyhaemo.util import np, _, _round_array, clparam
+from pyhaemo.util import np, _, _round_array, clparam, normalize
 from pyhaemo.types import Immutable, Int
 from pyhaemo.spl import NDSpline, UnivariateKnotVector, NDSplineArray
 from pyhaemo.spl.aux import sparse_kron
 from pyhaemo.geo.interp import linear_interpolation
-from pyhaemo.geo.notwist import compute_notwistframe_from_spline
+# from pyhaemo.geo.notwist import compute_notwistframe_from_spline
+from notwist import compute_notwistframe
 from pyhaemo.geo import ellipse
 from pyhaemo.mesh.bool import mesh_union
 
-from datahandler import csv_converter
+from datahandler import csv_converter, swc_converter
 from aux import plot_bifurcation
 from plot import plot_frames, plot_artery, pyvista_mesh
 import pyvista as pv
 
-from itertools import chain, combinations
+from itertools import chain, combinations, count
 from typing import Tuple, Sequence
 import os
 
 from numpy.typing import NDArray
-from scipy import sparse
-
-from mpl_toolkits.mplot3d import Axes3D
 
 
 def fill_diagonal(arr: NDArray, val: float) -> NDArray:
@@ -45,12 +43,14 @@ def centerline_length(centerline: NDSpline) -> float:
 
 def make_vessel(centerline: NDSpline,
                 radius: NDSpline,
-                cross_section: NDSplineArray, npoints=101):
+                cross_section: NDSplineArray, npoints=101, **kwargs):
 
   xi, = centerline.knotvector.gauss_abscissae
+  tangents = normalize(centerline(xi, dx=1))
 
   # compute the notwistframe rotation matrices
-  Rs = compute_notwistframe_from_spline(centerline, xi)
+  # Rs = compute_notwistframe_from_spline(centerline, xi)
+  Rs = compute_notwistframe(tangents, **kwargs)
   rRs = centerline.knotvector.fit([xi], radius(xi)[:, _, _] * Rs)
 
   return (cross_section[:, _] @ rRs[_]).sum(-1) + (cross_section.unity @ centerline)
@@ -88,6 +88,11 @@ class Artery(Immutable):
         radii.append(rspline)
 
     return cls(centerlines, radii, *args, **kwargs)
+
+  @classmethod
+  def from_swc(cls, filename: str, *args, **kwargs):
+    centerlines, radii, _ = swc_converter(filename)
+    return cls(centerlines, radii)
 
   def __init__(self, centerlines: Sequence[NDSpline],
                      radii: Sequence[NDSpline],
@@ -262,19 +267,39 @@ class Artery(Immutable):
     return plot_artery(self, npoints=npoints, **kwargs)
 
   def plot_mesh(self, npoints=5, dx=0.05, plotter=None, show=True, color='tan'):
+    from aux import compute_bif_input
+
+    bifs = compute_bif_input(self)
+
+    map_edge_endpoint_normals = {i: [None, None] for i in range(1, self.nedges + 1)}
+
+    for bif in bifs:
+      for myframe, index in zip(bif.compute_frames(), bif.indices):
+        if index < 0:
+          map_edge_endpoint_normals[abs(index)][0] = myframe[:, 0]
+        else:
+          map_edge_endpoint_normals[index][1] = myframe[:, 0]
+
     cross = ellipse(1, 1, npoints)
 
     if plotter is None:
       plotter = pv.Plotter()
 
-    for centerline, radius in zip(self.centerlines, self.radii):
+    for i, (centerline, radius) in enumerate(zip(self.centerlines, self.radii)):
       nsteps = max(int(centerline_length(centerline) / dx), 2)
       assert nsteps >= 2
-      myvessel = mesh_union(*make_vessel(centerline, radius, cross, nsteps).quick_sample((npoints, npoints, nsteps)))
+      myvessel = mesh_union(*make_vessel(centerline,
+                                         radius,
+                                         cross,
+                                         nsteps,
+                                         n0=map_edge_endpoint_normals[i+1][0],
+                                         nfinal=map_edge_endpoint_normals[i+1][1],
+                                         ).quick_sample((npoints, npoints, nsteps)), boundary=True)
       plotter.add_mesh(pyvista_mesh(myvessel), color=color, line_width=1, show_edges=True)
 
     if show:
       plotter.show()
+
     return plotter
 
   def truncate_edges(self, **kwargs):
@@ -292,6 +317,7 @@ class Artery(Immutable):
     assert set(kwargs.keys()).issubset(set(range(1, self.nedges + 1)))
 
     centerlines, radii = list(self.centerlines), list(self.radii)
+
     for key, (xi0, xi1) in kwargs.items():
       if xi0 is None and xi1 is None: continue
       if xi0 is None: vals, index = [xi1], 0
@@ -318,12 +344,10 @@ class Artery(Immutable):
       myradius = r([cline.knots[0][-k]]).ravel()[0]
       mylength = centerline_length(cline)
 
-      interval = cline.knots[0][-1] - cline.knots[0][0]
+      intv = cline.knots[0][-1] - cline.knots[0][0]
 
-      if k == 1:
-        kwargs[abs(index)][k] = cline.knots[0][-k] - rfac * myradius / mylength * interval
-      else:
-        kwargs[abs(index)][k] = cline.knots[0][-k] + rfac * myradius / mylength * interval
+      kwargs[abs(index)][k] = cline.knots[0][-k] + \
+                              rfac * myradius / mylength * intv * (-1 if index > 0 else 1)
 
     kwargs = {str(key): val for key, val in kwargs.items()
                             if not all(_val is None for _val in val)}
@@ -333,6 +357,25 @@ class Artery(Immutable):
         raise ValueError(f"Invalid truncation values for edge {key}: {a} > {b}")
 
     return self.truncate_edges(**kwargs)
+
+  def take(self, indices):
+    indices = tuple(map(abs, indices))
+    assert set(indices).issubset(set(range(1, self.nedges + 1)))
+
+    map_indices = dict(zip(indices, count(1)))
+    map_indices = {**map_indices, **{-k: -v for k, v in map_indices.items()}}
+
+    bifs = []
+    for bif in self.nontrivial_bifs:
+      mybif = tuple(map_indices[k] for k in bif if abs(k) in indices)
+      if mybif:
+        bifs.append(mybif)
+
+    centerlines = [self.centerlines[index-1] for index in indices]
+    radii = [self.radii[index-1] for index in indices]
+    return self._edit(centerlines=centerlines,
+                      radii=radii,
+                      bifurcations=bifs)
 
 
 if __name__ == '__main__':

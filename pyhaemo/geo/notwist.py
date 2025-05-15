@@ -12,6 +12,11 @@ def normalize_vector(vec):
   return vec / np.sqrt((vec**2).sum())
 
 
+@njit
+def clip(value, a, b):
+  return min(max(value, a), b)
+
+
 @njit(cache=True)
 def _compute_notwistframe(T, n0, zero_thresh):
   """
@@ -51,7 +56,7 @@ def _compute_notwistframe(T, n0, zero_thresh):
       normal = Rs[i-1][:, 0]
     else:
       omega = omega / norm
-      phi = np.arccos(np.dot(told, tnew))
+      phi = np.arccos(clip(np.dot(told, tnew), -1.0, 1.0))
 
       binormal_p = Rs[i-1][:, 1]
       binormal = binormal_p * np.cos(phi) + \
