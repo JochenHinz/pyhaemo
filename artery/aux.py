@@ -52,6 +52,7 @@ class Bifurcation(Immutable):
       normal = compute_orientation(self.points - self.points.sum(0) / len(self.points))
 
     self.normal = frozen(normalize(normal), dtype=float)
+
     assert self.normal.shape == (3,)
 
   def __len__(self):

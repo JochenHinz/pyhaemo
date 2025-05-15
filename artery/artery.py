@@ -7,6 +7,7 @@ from pyhaemo.geo.interp import linear_interpolation
 from notwist import compute_notwistframe
 from pyhaemo.geo import ellipse
 from pyhaemo.mesh.bool import mesh_union
+from pyhaemo.log import logger as log
 
 from datahandler import csv_converter, swc_converter
 from aux import plot_bifurcation
@@ -43,13 +44,13 @@ def centerline_length(centerline: NDSpline) -> float:
 
 def make_vessel(centerline: NDSpline,
                 radius: NDSpline,
-                cross_section: NDSplineArray, npoints=101, **kwargs):
+                cross_section: NDSplineArray, **kwargs):
 
-  xi, = centerline.knotvector.gauss_abscissae
+  assert -1 not in centerline.knotvector[0].continuity[1:-1]
+  xi, = centerline.knotvector.greville
   tangents = normalize(centerline(xi, dx=1))
 
   # compute the notwistframe rotation matrices
-  # Rs = compute_notwistframe_from_spline(centerline, xi)
   Rs = compute_notwistframe(tangents, **kwargs)
   rRs = centerline.knotvector.fit([xi], radius(xi)[:, _, _] * Rs)
 
@@ -131,6 +132,15 @@ class Artery(Immutable):
   @property
   def nedges(self):
     return len(self.centerlines)
+
+  @property
+  def endpoints(self):
+    ret = {}
+    for i, cline in enumerate(self.centerlines, 1):
+      ret[i] = cline(cline.knots[0][-1:])
+      ret[-i] = cline(cline.knots[0][:1])
+
+    return ret
 
   def get_bif(self, index: Int, return_index=False):
     """
@@ -270,11 +280,12 @@ class Artery(Immutable):
     from aux import compute_bif_input
 
     bifs = compute_bif_input(self)
-
     map_edge_endpoint_normals = {i: [None, None] for i in range(1, self.nedges + 1)}
+    frames = {}
 
     for bif in bifs:
       for myframe, index in zip(bif.compute_frames(), bif.indices):
+        frames[index] = myframe
         if index < 0:
           map_edge_endpoint_normals[abs(index)][0] = myframe[:, 0]
         else:
@@ -291,11 +302,12 @@ class Artery(Immutable):
       myvessel = mesh_union(*make_vessel(centerline,
                                          radius,
                                          cross,
-                                         nsteps,
                                          n0=map_edge_endpoint_normals[i+1][0],
-                                         nfinal=map_edge_endpoint_normals[i+1][1],
+                                         nfinal=map_edge_endpoint_normals[i+1][1]
                                          ).quick_sample((npoints, npoints, nsteps)), boundary=True)
-      plotter.add_mesh(pyvista_mesh(myvessel), color=color, line_width=1, show_edges=True)
+      plotter.add_mesh(pyvista_mesh(myvessel), color=color,
+                                               line_width=1,
+                                               show_edges=True)
 
     if show:
       plotter.show()
@@ -328,7 +340,7 @@ class Artery(Immutable):
 
     return self._edit(centerlines=centerlines, radii=radii)
 
-  def biftruncate(self, rfac=2, eps=1e-9):
+  def biftruncate(self, rfac=3, eps=1e-9):
     """
     Truncate the centerlines and radii at the bifurcations such that their
     distance to the bifurcation is at least rfac times the radius of the
@@ -338,23 +350,43 @@ class Artery(Immutable):
     """
     kwargs = dict(zip(range(1, self.nedges + 1), ([None, None] for _ in range(self.nedges))))
 
-    for index in chain(*self.nontrivial_bifs):
-      k = 0 if index < 0 else 1
-      cline, r = self.centerlines[abs(index)-1], self.radii[abs(index)-1]
-      myradius = r([cline.knots[0][-k]]).ravel()[0]
-      mylength = centerline_length(cline)
+    endpoints = self.endpoints
 
-      intv = cline.knots[0][-1] - cline.knots[0][0]
+    for bif in self.nontrivial_bifs:
+      points = []
 
-      kwargs[abs(index)][k] = cline.knots[0][-k] + \
-                              rfac * myradius / mylength * intv * (-1 if index > 0 else 1)
+      for index in bif:
+        mypoint = endpoints[index]
+
+        # don't count equal points twice
+        if not any( np.allclose(my, mypoint) for my in points ):
+          points.append(mypoint)
+
+      centerpoint = np.mean(points, axis=0)
+      for index in bif:
+        k = 0 if index < 0 else 1
+        cline, r = self.centerlines[abs(index)-1], self.radii[abs(index)-1]
+        distance_center = np.linalg.norm(cline([cline.knots[0][-k]]) - centerpoint)
+        myradius = r([cline.knots[0][-k]]).ravel()[0]
+        radius_eff = rfac * myradius - distance_center
+
+        if radius_eff < 0:
+          continue
+
+        mylength = centerline_length(cline)
+        intv = cline.knots[0][-1] - cline.knots[0][0]
+        kwargs[abs(index)][k] = cline.knots[0][-k] + \
+                                radius_eff / mylength * intv * (-1 if index > 0 else 1)
 
     kwargs = {str(key): val for key, val in kwargs.items()
                             if not all(_val is None for _val in val)}
     for key, (a, b) in kwargs.items():
       if any( val is None for val in (a, b) ): continue
       if b < a:
-        raise ValueError(f"Invalid truncation values for edge {key}: {a} > {b}")
+        log.warning(f"Invalid truncation values for edge {key}: {a} > {b}."
+                     "Truncating to ensure that the vessel is not empty.")
+        mylength = centerline_length(self.centerlines[int(key)-1])
+        kwargs[key] = ((b + a) / 2 - 0.1 * mylength, (b + a) / 2 + 0.1 * mylength)
 
     return self.truncate_edges(**kwargs)
 
