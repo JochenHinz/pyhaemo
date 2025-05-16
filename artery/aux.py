@@ -1,10 +1,8 @@
-import numpy as np
-from pyhaemo.util import np, _, clparam, normalize, frozen
+from pyhaemo.util import np, _, normalize, frozen
 from pyhaemo.types import Immutable
 from pyhaemo.geo.notwist import compute_notwistframe
+from pyhaemo.spl import NDSpline
 from pyhaemo.log import logger as log
-
-from typing import Optional
 
 import matplotlib.pyplot as plt
 
@@ -227,3 +225,13 @@ def plot_bifurcation(artery):
                       length=1.0, normalize=True)
 
     plt.show()
+
+
+def centerline_length(centerline: NDSpline) -> float:
+  """
+  Compute the length of a centerline spline using the Gauss points.
+  """
+  xi, = centerline.knotvector.gauss_abscissae
+  assert len(xi) > 1
+  x = centerline(xi)
+  return ((np.diff(x, axis=0)**2).sum(1) ** .5).sum()

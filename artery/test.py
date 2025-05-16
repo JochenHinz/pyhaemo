@@ -1,8 +1,6 @@
 from artery import Artery
 from plot import plot_frames
 
-from itertools import chain
-
 
 def plot_swc_data():
   filename = "data/swc_files/BH0004.CNG.swc"
@@ -17,7 +15,9 @@ def plot_swc_data():
 def plot_csv_data():
   artery = Artery.from_csv("data/centerlines_csv") \
                  .chordlength_parameterize() \
-                 .create_proximity_tree(0.2).biftruncate(rfac=3).orient()
+                 .create_proximity_tree(0.15) \
+                 .biftruncate(rfac=3) \
+                 .orient()
   # artery = artery.take( list(chain(*artery.nontrivial_bifs[:2] )) )
   # artery.plot_mesh()
   # import ipdb

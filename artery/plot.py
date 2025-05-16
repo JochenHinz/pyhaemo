@@ -1,12 +1,29 @@
 from pyhaemo.util import np, _, normalize
 from pyhaemo.mesh import rectilinear, LineMesh, mesh_union
+from pyhaemo.spl import NDSpline, NDSplineArray
 from pyhaemo.geo import ellipse
 from pyhaemo.log import logger as log
+from notwist import compute_notwistframe
 from geom import compute_frames, estimate_normal
-from aux import compute_bif_input, compute_orientation
+from aux import compute_bif_input, centerline_length
 
 import pyvista as pv
 import vtk
+
+
+def make_vessel(centerline: NDSpline,
+                radius: NDSpline,
+                cross_section: NDSplineArray, **kwargs):
+
+  assert -1 not in centerline.knotvector[0].continuity[1:-1]
+  xi, = centerline.knotvector.greville
+  tangents = normalize(centerline(xi, dx=1))
+
+  # compute the notwistframe rotation matrices
+  Rs = compute_notwistframe(tangents, **kwargs)
+  rRs = centerline.knotvector.fit([xi], radius(xi)[:, _, _] * Rs)
+
+  return (cross_section[:, _] @ rRs[_]).sum(-1) + (cross_section.unity @ centerline)
 
 
 def pyvista_mesh(mesh):
@@ -147,3 +164,45 @@ def plot_frames(artery):
 
   plotter.add_mesh(pyvista_mesh(final_mesh), color='tan', line_width=1, show_edges=True)
   plotter.show()
+
+
+def plot_mesh(artery, npoints=5, dx=0.05, plotter=None, show=True, color='tan'):
+
+  bifs = compute_bif_input(artery)
+  map_edge_endpoint_normals = {i: [None, None] for i in range(1, artery.nedges + 1)}
+  frames = {}
+
+  for bif in bifs:
+    for myframe, index in zip(bif.compute_frames(), bif.indices):
+      frames[index] = myframe
+      if index < 0:
+        map_edge_endpoint_normals[abs(index)][0] = myframe[:, 0]
+      else:
+        map_edge_endpoint_normals[index][1] = myframe[:, 0]
+
+  cross = ellipse(1, 1, npoints)
+
+  if plotter is None:
+    plotter = pv.Plotter()
+
+  centers = artery.bifcenters()
+  plotter.add_points(centers, color='red')
+  plotter.add_point_labels(centers, [str(i) for i in range(len(artery.bifurcations))])
+
+  for i, (centerline, radius) in enumerate(zip(artery.centerlines, artery.radii)):
+    nsteps = max(int(centerline_length(centerline) / dx), 2)
+    assert nsteps >= 2
+    myvessel = mesh_union(*make_vessel(centerline,
+                                       radius,
+                                       cross,
+                                       n0=map_edge_endpoint_normals[i+1][0],
+                                       nfinal=map_edge_endpoint_normals[i+1][1]
+                                       ).quick_sample((npoints, npoints, nsteps)), boundary=True)
+    plotter.add_mesh(pyvista_mesh(myvessel), color=color,
+                                             line_width=1,
+                                             show_edges=True)
+
+  if show:
+    plotter.show()
+
+  return plotter

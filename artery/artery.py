@@ -1,18 +1,12 @@
-from pyhaemo.util import np, _, _round_array, clparam, normalize
+from pyhaemo.util import np, _, _round_array, clparam
 from pyhaemo.types import Immutable, Int
-from pyhaemo.spl import NDSpline, UnivariateKnotVector, NDSplineArray
-from pyhaemo.spl.aux import sparse_kron
+from pyhaemo.spl import NDSpline, UnivariateKnotVector
 from pyhaemo.geo.interp import linear_interpolation
-# from pyhaemo.geo.notwist import compute_notwistframe_from_spline
-from notwist import compute_notwistframe
-from pyhaemo.geo import ellipse
-from pyhaemo.mesh.bool import mesh_union
 from pyhaemo.log import logger as log
 
 from datahandler import csv_converter, swc_converter
-from aux import plot_bifurcation
-from plot import plot_frames, plot_artery, pyvista_mesh
-import pyvista as pv
+from aux import centerline_length
+from plot import plot_frames, plot_artery
 
 from itertools import chain, combinations, count
 from typing import Tuple, Sequence
@@ -31,31 +25,6 @@ def fill_diagonal(arr: NDArray, val: float) -> NDArray:
   arr[indices, indices] = val
 
   return arr
-
-
-def centerline_length(centerline: NDSpline) -> float:
-  """
-  Compute the length of a centerline spline using the Gauss points.
-  """
-  xi, = centerline.knotvector.gauss_abscissae
-  assert len(xi) > 1
-  x = centerline(xi)
-  return ((np.diff(x, axis=0)**2).sum(1) ** .5).sum()
-
-
-def make_vessel(centerline: NDSpline,
-                radius: NDSpline,
-                cross_section: NDSplineArray, **kwargs):
-
-  assert -1 not in centerline.knotvector[0].continuity[1:-1]
-  xi, = centerline.knotvector.greville
-  tangents = normalize(centerline(xi, dx=1))
-
-  # compute the notwistframe rotation matrices
-  Rs = compute_notwistframe(tangents, **kwargs)
-  rRs = centerline.knotvector.fit([xi], radius(xi)[:, _, _] * Rs)
-
-  return (cross_section[:, _] @ rRs[_]).sum(-1) + (cross_section.unity @ centerline)
 
 
 class Artery(Immutable):
@@ -278,64 +247,12 @@ class Artery(Immutable):
     else:
       return self
 
-  def create_bifurcations(self):
-    from aux import Bifurcation
-    endpoints = self.endpoints()
-    tangents = self.endpoints(dx=1)
-
-    bifs = []
-    for bif in self.nontrivial_bifs:
-      biff = Bifurcation([endpoints[i] for i in bif],
-                         [tangents[i] * (1 if i > 0 else -1) for i in bif],
-                         indices=bif)
-      bifs.append(biff)
-
-    return tuple(bifs)
-
   def plot_pyvista(self, npoints=1001, **kwargs):
     return plot_artery(self, npoints=npoints, **kwargs)
 
-  def plot_mesh(self, npoints=5, dx=0.05, plotter=None, show=True, color='tan'):
-    from aux import compute_bif_input
-
-    bifs = compute_bif_input(self)
-    map_edge_endpoint_normals = {i: [None, None] for i in range(1, self.nedges + 1)}
-    frames = {}
-
-    for bif in bifs:
-      for myframe, index in zip(bif.compute_frames(), bif.indices):
-        frames[index] = myframe
-        if index < 0:
-          map_edge_endpoint_normals[abs(index)][0] = myframe[:, 0]
-        else:
-          map_edge_endpoint_normals[index][1] = myframe[:, 0]
-
-    cross = ellipse(1, 1, npoints)
-
-    if plotter is None:
-      plotter = pv.Plotter()
-
-    centers = self.bifcenters()
-    plotter.add_points(centers, color='red')
-    plotter.add_point_labels(centers, [str(i) for i in range(len(self.bifurcations))])
-
-    for i, (centerline, radius) in enumerate(zip(self.centerlines, self.radii)):
-      nsteps = max(int(centerline_length(centerline) / dx), 2)
-      assert nsteps >= 2
-      myvessel = mesh_union(*make_vessel(centerline,
-                                         radius,
-                                         cross,
-                                         n0=map_edge_endpoint_normals[i+1][0],
-                                         nfinal=map_edge_endpoint_normals[i+1][1]
-                                         ).quick_sample((npoints, npoints, nsteps)), boundary=True)
-      plotter.add_mesh(pyvista_mesh(myvessel), color=color,
-                                               line_width=1,
-                                               show_edges=True)
-
-    if show:
-      plotter.show()
-
-    return plotter
+  def plot_mesh(self, *args, **kwargs):
+    from plot import plot_mesh
+    return plot_mesh(self, *args, **kwargs)
 
   def truncate_edges(self, **kwargs):
     """
@@ -408,8 +325,11 @@ class Artery(Immutable):
       if b < a:
         log.warning(f"Invalid truncation values for edge {key}: {a} > {b}."
                      "Truncating to ensure that the vessel is not empty.")
-        mylength = centerline_length(self.centerlines[int(key)-1])
-        kwargs[key] = ((b + a) / 2 - 0.2 * mylength, (b + a) / 2 + 0.2 * mylength)
+        cline = self.centerlines[int(key)-1]
+        intv = cline.knots[0][-1] - cline.knots[0][0]
+        mylength = centerline_length(cline)
+        kwargs[key] = ((b + a) / 2 - 0.2 * mylength * intv,
+                       (b + a) / 2 + 0.2 * mylength * intv)
 
     return self.truncate_edges(**kwargs)
 
@@ -435,6 +355,7 @@ class Artery(Immutable):
   def orient(self):
     from geom import sort_ccw
     endpoints = self.endpoints()
+
     bifs = []
     for i, bif in enumerate(self.nontrivial_bifs):
       mypoints = np.stack([endpoints[index] for index in bif])
@@ -442,6 +363,7 @@ class Artery(Immutable):
         raise ValueError("Duplicate points in bifurcation")
       shuffle = sort_ccw([endpoints[index] for index in bif])
       bifs.append( tuple(bif[i] for i in shuffle) )
+
     return self._edit(bifurcations=bifs)
 
 
