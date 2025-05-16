@@ -12,7 +12,7 @@ dependencies = [
     "nutils >=8.8, <9",
     "numba >=0.60.0, <1",
     "vtk >=9.3.1, <10",
-    "pyvista >=0.44.1, <1",
+    "pyvista >=0.45.2, <1",
     "pygmsh >=7.1.17, <8",
     "networkx >=3.4.2, <4"
 ]
