@@ -59,17 +59,10 @@ def _compute_notwistframe(T, n0, zero_thresh):
       omega = omega / norm
       phi = np.arccos(max(-1, min(np.dot(told, tnew), 1)))
 
-      binormal_p = Rs[i-1][:, 1]
-      binormal = binormal_p * np.cos(phi) + \
-                 np.cross(omega, binormal_p) * np.sin(phi) + \
-                 omega * np.dot(omega, binormal_p) * (1 - np.cos(phi))
+      binormal = rotate_vector(Rs[i-1][:, 1], omega, phi)
+      normal = rotate_vector(Rs[i-1][:, 0], omega, phi)
 
-      normal_p = Rs[i-1][:, 0]
-      normal = normal_p * np.cos(phi) + \
-               np.cross(omega, normal_p) * np.sin(phi) + \
-               omega * np.dot(omega, normal_p) * (1 - np.cos(phi))
-
-    Rs[i][:, 0] = (normal)/np.linalg.norm(normal)
+    Rs[i][:, 0] = normal/np.linalg.norm(normal)
     Rs[i][:, 1] = binormal/np.linalg.norm(binormal)
     Rs[i][:, 2] = T[i]/np.linalg.norm(T[i])
 
