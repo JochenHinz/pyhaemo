@@ -10,6 +10,26 @@ from typing import Sequence
 from functools import partial
 
 from numpy.typing import NDArray
+import pyvista as pv
+
+
+def plot_frames(frames, radii, points, xC, normal):
+  plotter = pv.Plotter()
+
+  plotter.add_points(points, color='red')
+  plotter.add_point_labels(points, [str(i) for i in range(len(points))])
+
+  for i, (frame, radius, point) in enumerate(zip(frames, radii, points)):
+    for color, vec in zip(['red', 'blue', 'green'], frame.T):
+      arrow = pv.Arrow(start=point, direction=vec, scale=float(radius))
+      plotter.add_mesh(arrow, color=color, line_width=.5, label="Frame")
+
+  plotter.add_points(xC, color='red')
+  n = pv.Arrow(start=xC,
+               direction=normal,
+               scale=float( np.mean(radii) ))
+  plotter.add_mesh(n, color='black', line_width=1, label="Normal")
+  plotter.show()
 
 
 def make_vessel(disc: NDSplineArray,
@@ -94,6 +114,8 @@ def main(nelems_centerline: Int,
   ax = normalize(np.asarray(sum(normals) / len(normals)))
   bT, bB = (sum(r[0] for r in radii) / len(radii),)*2
 
+  plot_frames(bifframe, np.array([.1, .1, .1, .1]), endpoints, xC, ax)
+
   bif = bif_from_matrices(matrices, endpoints, ax, xC, bB, bT, disc)
 
   npoints = 5
@@ -117,12 +139,13 @@ if __name__ == '__main__':
                                         np.array([0, -1, 0]),
                                         np.array([-1, 0, 0]))(xi)[::-1]
 
-  angle = 2 / 3 * np.pi
+  angle = 1 / 2 * np.pi
   rotxy = lambda angle: np.array([[np.cos(angle), -np.sin(angle), 0],
                                   [np.sin(angle), np.cos(angle), 0],
                                   [0, 0, 1]])
 
   points1 = (rotxy(angle) @ points0.T).T
-  points2 = (rotxy(angle + 0.9) @ points1.T).T
+  points2 = (rotxy(angle) @ points1.T).T
+  points3 = (rotxy(angle) @ points2.T).T + np.array([[0, .1, 0]])
 
-  main(30, 4, [points0, points1, points2], [.5 * eps * np.ones(npoints)]*3)
+  main(30, 4, [points0, points1, points2, points3], [.5 * eps * np.ones(npoints)]*4)

@@ -1,7 +1,8 @@
 from pyhaemo.util import np, _, normalize
 from pyhaemo.spl import NDSplineArray, NDSpline
 from pyhaemo.geo import ellipse
-from pyhaemo.geo.bif import repeated_knot_disc, bif_from_matrices
+from pyhaemo.geo.bif import repeated_knot_disc
+import pyvista as pv
 
 from typing import Sequence
 
@@ -10,6 +11,7 @@ from geom import estimate_normal, compute_frames
 from notwist import compute_notwistframe
 from artery import Artery
 from solve import fit_constrained
+from bif import bif_from_matrices
 
 from numpy.typing import NDArray
 from pyhaeme_nfur import find_butterfly_line
@@ -32,6 +34,25 @@ def make_bif_(points: NDArray,
                             unitdisc=cross )
 
 
+def plot_frames(frames, radii, points, xC, normal):
+  plotter = pv.Plotter()
+
+  plotter.add_points(points, color='red')
+  plotter.add_point_labels(points, [str(i) for i in range(len(points))])
+
+  for i, (frame, radius, point) in enumerate(zip(frames, radii, points)):
+    for color, vec in zip(['red', 'blue', 'green'], frame.T):
+      arrow = pv.Arrow(start=point, direction=vec, scale=float(radius))
+      plotter.add_mesh(arrow, color=color, line_width=.5, label="Frame")
+
+  plotter.add_points(xC, color='red')
+  n = pv.Arrow(start=xC,
+               direction=normal,
+               scale=float( np.mean(radii) ))
+  plotter.add_mesh(n, color='black', line_width=1, label="Normal")
+  plotter.show()
+
+
 def make_bif(points: NDArray,
              radii: NDArray,
              frames: NDArray,
@@ -39,12 +60,15 @@ def make_bif(points: NDArray,
   points, radii, frames = map(np.asarray, (points, radii, frames))
   # ax
   x_top, xC, x_bot = find_butterfly_line(radii, points, frames)
-  normal = normalize( x_top - x_bot )
+  # normal = normalize( x_top - x_bot )
+  normal = estimate_normal(points)
   bB = bT = np.mean(radii)
 
   # x becomes y and y becomes -x
-  matrices = [f @ np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]]) for f in frames]
-  matrices = [f * r for f, r in zip(frames, radii)]
+  matrices = [f @ np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]]) for f in frames]
+  # plot_frames(matrices, radii, points, np.mean(points, axis=0), normal)
+
+  matrices = [m * r for m, r in zip(matrices, radii)]
 
   return bif_from_matrices( matrices, points, normal, xC, bB, bT,
                             unitdisc=cross )
@@ -130,9 +154,9 @@ if __name__ == '__main__':
                  .chordlength_parameterize() \
                  .create_proximity_tree(0.15) \
                  .biftruncate(rfac=3) \
-                 .reparameterize() \
-                 .orient()
-  # artery = artery.take(artery.nontrivial_bifs[0])
+                 .reparameterize()
+  # artery = artery.take(artery.nontrivial_bifs[3])
+  artery = artery.orient()
   lengths = [centerline_length(cline) for cline in artery.centerlines]
   dx = 0.1
   nsteps_z = [max(int(length / dx), 2) for length in lengths]

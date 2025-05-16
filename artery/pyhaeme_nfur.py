@@ -33,7 +33,7 @@ def find_butterfly_line(radii, points, frames):
  dec_tangents = []
 
  # TODO: make this scaling a parameter specific for each curve.
- alpha = 5
+ alpha = 2
  for i in range(n_branches):
 
      start_index = i
