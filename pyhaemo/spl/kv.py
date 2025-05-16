@@ -140,6 +140,15 @@ class UnivariateKnotVector(Immutable):
     """ Return the distance between distinct knots. """
     return np.diff(self.knots)
 
+  def reparameterize(self):
+    """
+    Change the knotvector's domain to (0, 1).
+    """
+    if self.knots[0] == 0 and self.knots[-1] == 1:
+      return self
+    knots = self.knots
+    return self._edit(knotvalues=(knots - knots[0]) / (knots[-1] - knots[0]))
+
   def flip(self) -> Self:
     """
     Flip the knotvector.
@@ -575,7 +584,7 @@ def add_vectorizations(cls):
 
   # add all index vectorized methods
   for name in 'flip', 'refine', 'ref_by', 'add_knots', 'degree_elevate', \
-              'raise_multiplicities':
+              'reparameterize', 'raise_multiplicities':
     setattr(cls, name, _vectorize_with_indices(name))
 
   # add all vectorized properties
@@ -627,6 +636,7 @@ class TensorKnotVector(Immutable):
   ref_by: Callable
   add_knots: Callable
   degree_elevate: Callable
+  reparameterize: Callable
   raise_multiplicities: Callable
 
   __or__: Callable

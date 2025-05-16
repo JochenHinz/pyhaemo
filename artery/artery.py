@@ -19,6 +19,7 @@ from typing import Tuple, Sequence
 import os
 
 from numpy.typing import NDArray
+from scipy.spatial import cKDTree
 
 
 def fill_diagonal(arr: NDArray, val: float) -> NDArray:
@@ -108,23 +109,21 @@ class Artery(Immutable):
     # TODO: This block is too verbose
 
     nedges = len(self.centerlines)
-    all_endpoints = set( chain(*( (((i,), (-i,))) for i in range(1, nedges+1) )) )
+    all_endpoints = set(range(1, self.nedges+1)) | set(-i for i in range(1, self.nedges+1))
     seen = set()
 
     _bifurcations = []
 
-    for bif in map(tuple, bifurcations):
-      mybif = []
-      for val in map(int, bif):
+    for bif in map(lambda x: tuple(map(int, x)), bifurcations):
+      for val in bif:
         assert val not in seen and 0 < abs(val) <= nedges
-        all_endpoints -= {(val,)}
+        all_endpoints -= {val}
         seen.add(val)
-        mybif.append(val)
-      _bifurcations.append(tuple(mybif))
 
+      _bifurcations.append(bif)
+
+    self.bifurcations = tuple(sorted(_bifurcations + [(i,) for i in all_endpoints]))
     ####
-
-    self.bifurcations = tuple(sorted( tuple(_bifurcations) + tuple(all_endpoints) ))
 
     assert len( tuple(chain(*self.bifurcations)) ) == len(self.centerlines) * 2
     assert tuple(sorted(set(map(abs, chain(*self.bifurcations))))) == tuple(range(1, nedges+1))
@@ -133,12 +132,11 @@ class Artery(Immutable):
   def nedges(self):
     return len(self.centerlines)
 
-  @property
-  def endpoints(self):
+  def endpoints(self, dx=0):
     ret = {}
     for i, cline in enumerate(self.centerlines, 1):
-      ret[i] = cline(cline.knots[0][-1:])
-      ret[-i] = cline(cline.knots[0][:1])
+      ret[i] = cline(cline.knots[0][-1:], dx=dx).ravel()
+      ret[-i] = cline(cline.knots[0][:1], dx=dx).ravel()
 
     return ret
 
@@ -155,14 +153,21 @@ class Artery(Immutable):
     """
     Reparameterize such that every curve goes from 0 to 1.
     """
-    centerlines, radii = [], []
-    for cl, r in zip(self.centerlines, self.radii):
-      kv, = cl.knotvector
-      kv = kv._edit(knotvalues=(kv.knots - kv.knots[0]) / (kv.knots[-1] - kv.knots[0]))
-      centerlines.append(cl._edit(knotvector=kv))
-      radii.append(r._edit(knotvector=kv))
-
+    centerlines = [centerline.reparameterize(...) for centerline in self.centerlines]
+    radii = [r.reparameterize(...) for r in self.radii]
     return self._edit(centerlines=centerlines, radii=radii)
+
+  def bifcenters(self, eps=1e-9):
+    endpoints = self.endpoints()
+    centers = []
+    for bif in self.bifurcations:
+      mypoints = []
+      for index in bif:
+        mypoint = endpoints[index]
+        if not any( np.linalg.norm(point - mypoint) < eps for point in mypoints ):
+          mypoints.append(mypoint)
+      centers.append( np.mean(mypoints, axis=0) )
+    return np.stack(centers, axis=0)
 
   def chordlength_parameterize(self, npoints=1001):
     """
@@ -273,6 +278,20 @@ class Artery(Immutable):
     else:
       return self
 
+  def create_bifurcations(self):
+    from aux import Bifurcation
+    endpoints = self.endpoints()
+    tangents = self.endpoints(dx=1)
+
+    bifs = []
+    for bif in self.nontrivial_bifs:
+      biff = Bifurcation([endpoints[i] for i in bif],
+                         [tangents[i] * (1 if i > 0 else -1) for i in bif],
+                         indices=bif)
+      bifs.append(biff)
+
+    return tuple(bifs)
+
   def plot_pyvista(self, npoints=1001, **kwargs):
     return plot_artery(self, npoints=npoints, **kwargs)
 
@@ -295,6 +314,10 @@ class Artery(Immutable):
 
     if plotter is None:
       plotter = pv.Plotter()
+
+    centers = self.bifcenters()
+    plotter.add_points(centers, color='red')
+    plotter.add_point_labels(centers, [str(i) for i in range(len(self.bifurcations))])
 
     for i, (centerline, radius) in enumerate(zip(self.centerlines, self.radii)):
       nsteps = max(int(centerline_length(centerline) / dx), 2)
@@ -340,7 +363,7 @@ class Artery(Immutable):
 
     return self._edit(centerlines=centerlines, radii=radii)
 
-  def biftruncate(self, rfac=3, eps=1e-9):
+  def biftruncate(self, rfac=2.5, eps=1e-9):
     """
     Truncate the centerlines and radii at the bifurcations such that their
     distance to the bifurcation is at least rfac times the radius of the
@@ -350,7 +373,7 @@ class Artery(Immutable):
     """
     kwargs = dict(zip(range(1, self.nedges + 1), ([None, None] for _ in range(self.nedges))))
 
-    endpoints = self.endpoints
+    endpoints = self.endpoints()
 
     for bif in self.nontrivial_bifs:
       points = []
@@ -366,8 +389,8 @@ class Artery(Immutable):
       for index in bif:
         k = 0 if index < 0 else 1
         cline, r = self.centerlines[abs(index)-1], self.radii[abs(index)-1]
-        distance_center = np.linalg.norm(cline([cline.knots[0][-k]]) - centerpoint)
-        myradius = r([cline.knots[0][-k]]).ravel()[0]
+        mypoint, (myradius,) = endpoints[index], r([cline.knots[0][-k]]).ravel()
+        distance_center = np.linalg.norm(mypoint - centerpoint)
         radius_eff = rfac * myradius - distance_center
 
         if radius_eff < 0:
@@ -386,7 +409,7 @@ class Artery(Immutable):
         log.warning(f"Invalid truncation values for edge {key}: {a} > {b}."
                      "Truncating to ensure that the vessel is not empty.")
         mylength = centerline_length(self.centerlines[int(key)-1])
-        kwargs[key] = ((b + a) / 2 - 0.1 * mylength, (b + a) / 2 + 0.1 * mylength)
+        kwargs[key] = ((b + a) / 2 - 0.2 * mylength, (b + a) / 2 + 0.2 * mylength)
 
     return self.truncate_edges(**kwargs)
 
@@ -408,6 +431,18 @@ class Artery(Immutable):
     return self._edit(centerlines=centerlines,
                       radii=radii,
                       bifurcations=bifs)
+
+  def orient(self):
+    from geom import sort_ccw
+    endpoints = self.endpoints()
+    bifs = []
+    for i, bif in enumerate(self.nontrivial_bifs):
+      mypoints = np.stack([endpoints[index] for index in bif])
+      if len(cKDTree(mypoints).query_pairs(0.001)):
+        raise ValueError("Duplicate points in bifurcation")
+      shuffle = sort_ccw([endpoints[index] for index in bif])
+      bifs.append( tuple(bif[i] for i in shuffle) )
+    return self._edit(bifurcations=bifs)
 
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@ import numpy as np
 from pyhaemo.util import np, _, clparam, normalize, frozen
 from pyhaemo.types import Immutable
 from pyhaemo.geo.notwist import compute_notwistframe
+from pyhaemo.log import logger as log
 
 from typing import Optional
 
@@ -18,23 +19,48 @@ def distance(arr0: np.ndarray, arr1: np.ndarray) -> np.ndarray:
   return np.sqrt(((arr0 - arr1)**2).sum(-1))
 
 
-class Plane(Immutable):
-  def __init__(self, normal: np.ndarray, point: Optional[np.ndarray] = None):
-    self.normal = frozen(normalize(normal), dtype=float)
-    if point is None:
-      point = [0, 0, 0]
-    self.point = frozen(point, dtype=float)
-    assert self.point.shape == self.normal.shape == (3,)
-
-  def project(self, points: np.ndarray) -> np.ndarray:
+def project_onto_plane(points, normal):
     """
-    Projects points onto the plane defined by the normal vector and point.
-    Works both for a single point and a batch of points.
-    """
-    points = np.asarray(points)
-    ndims = points.ndim - 1
+    Project 3D points onto a plane defined by a normal vector.
 
-    return points - ((points - self.point) @ self.normal)[(slice(None),) * ndims + (_,)] * self.normal
+    Args:
+        points (np.ndarray): Array of 3D points with shape (n, 3).
+        normal (np.ndarray): Normal vector of the plane.
+
+    Returns:
+        np.ndarray: Projected 2D points.
+    """
+    normal = normalize(normal)
+    projection_matrix = np.eye(3) - np.outer(normal, normal)
+    return points @ projection_matrix.T
+
+
+# todo: add a test when the vector are on xy plane, the normal has to be (0,0,1)
+def compute_orientation(tangents):
+    """
+    Compute the orientation for a general number of tangents.
+
+    Args:
+        tangents (list of np.ndarray): List of tangent vectors for each branch.
+
+    Returns:
+        dict: A dictionary containing the computed normal and combined tangent.
+    """
+    # Normalize the tangents
+    tangents = normalize(tangents)
+
+    if len(tangents) == 1:
+      # TODO: think about a linear operation that takes the vector (0, 0, 1)
+      #       to (1, 0, 0)
+      (a, b, c), = tangents
+      return normalize(np.array([1, 1, -(b + a) / c])[_])
+
+    if len(tangents) < 2:
+        if np.allclose(np.abs(np.dot(*tangents)), 1):
+          log.warning("The two tangents are parallel. Returning a default normal.")
+        return compute_orientation(tangents[:1])
+
+    return normalize( np.cross(tangents[0], tangents[1:]).sum(0) )
 
 
 class Bifurcation(Immutable):
@@ -58,7 +84,7 @@ class Bifurcation(Immutable):
   def __len__(self):
     return len(self.points)
 
-  def orient(self):
+  def orient(self, return_indices=False):
     ppoints = []
     for point in self.points:
       ppoints.append( project_onto_plane(point, self.normal) )
@@ -75,10 +101,14 @@ class Bifurcation(Immutable):
 
     indices = np.argsort(angles)
 
-    return self._edit( points=self.points[indices],
-                       tangents=self.tangents[indices],
-                       indices=tuple(self.indices[i] for i in indices),
-                       normal=self.normal )
+    ret = self._edit( points=self.points[indices],
+                      tangents=self.tangents[indices],
+                      indices=tuple(self.indices[i] for i in indices),
+                      normal=self.normal )
+    if return_indices:
+      return ret, tuple(self.indices[i] for i in indices)
+
+    return ret
 
   def compute_frames(self):
     t0 = self.tangents[0]
@@ -97,116 +127,6 @@ class Bifurcation(Immutable):
       frames.append(frame[-1] @ np.diag([1, -1, -1]))
 
     return tuple(frames)
-
-
-def project_onto_plane(points, normal):
-    """
-    Project 3D points onto a plane defined by a normal vector.
-
-    Args:
-        points (np.ndarray): Array of 3D points with shape (n, 3).
-        normal (np.ndarray): Normal vector of the plane.
-
-    Returns:
-        np.ndarray: Projected 2D points.
-    """
-    normal = normalize(normal)
-    projection_matrix = np.eye(3) - np.outer(normal, normal)
-    return points @ projection_matrix.T
-
-
-def find_clock_wise_order(points, tangents, bif):
-    """
-    Determines the clockwise order of a set of points and tangents around a bifurcation point.
-    Parameters:
-        points (list or np.ndarray): A list or array of 3D points to be ordered.
-        tangents (list or np.ndarray): A list or array of tangent vectors corresponding to the points.
-        bif (tuple): A tuple containing bifurcation-related data.
-    Returns:
-        tuple: A tuple containing:
-            - normal (np.ndarray): The normal vector of the plane used for projection.
-            - points_clockwise (np.ndarray): The points ordered in clockwise direction.
-            - tangents_clockwise (np.ndarray): The tangents ordered in clockwise direction.
-            - bif_clockwise (tuple): The bifurcation data reordered to match the clockwise order.
-    """
-
-    # XXX: this method will fail when two of the tangents are (close to) parallel
-    points = np.asarray(points, dtype=float)
-    tangents = np.asarray(tangents, dtype=float)
-
-    arrows = normalize(points - points.sum(0) / len(points))
-
-    normal = compute_orientation(arrows)
-
-    # Project points onto the plane
-    projected_points = []
-    for point in points:
-      p = project_onto_plane(point, normal)
-      projected_points.append(p)
-
-    projected_points = np.array(projected_points).reshape(len(tangents), -1)
-    vectors = normalize(projected_points - np.mean(projected_points, axis=0))
-
-    angles = [0]
-    for i in range(1, len(vectors)):
-      cross = normalize(np.cross(vectors[0], vectors[i]))
-      dots = np.sum(vectors[0] * vectors[i])
-      scalar_prod = (cross * normal).sum()
-      angles.append((+1 if scalar_prod > 0 else -1) * np.arccos(dots))
-
-    angles = np.array(angles)
-    index = np.argsort(angles)
-
-    angles = angles[index]
-    points_ccw = np.array(points)[index]
-    tangents_ccw = np.array(tangents)[index]
-    bif_ccw = tuple( bif[i] for i in index )
-
-    return normal, points_ccw, tangents_ccw, bif_ccw
-
-
-def compute_frames(normal_bif, tangents, points):
-    """
-    Computes a series of frames for a bifurcation geometry based on the provided
-    normal vector, tangents, and points.
-    Parameters:
-    -----------
-    normal_bif : numpy.ndarray
-        The normal vector at the bifurcation point.
-    tangents : list of numpy.ndarray
-        A list of tangent vectors corresponding to the bifurcation branches.
-    points : list of numpy.ndarray
-        A list of points defining the bifurcation geometry.
-    Returns:
-    --------
-    frames : list of numpy.ndarray
-        A list of 3x3 frame matrices, where each frame is defined by three
-        orthonormal vectors (normal, binormal, tangent) for each branch of the
-        bifurcation.
-    """
-    points = np.asarray(points, dtype=float)
-    tangents = np.asarray(tangents, dtype=float)
-
-    assert points.shape == tangents.shape and points.shape[1:] == (3,)
-
-    normal_proj = normalize(project_onto_plane(normal_bif, tangents[0]))
-    binormal = normalize(np.cross(tangents[0], normal_proj))
-
-    Fr1 = np.stack((normal_proj, binormal, tangents[0]), axis=1)
-
-    frames = [Fr1]
-
-    for tangent in tangents[1:]:
-      tangents_ = np.stack((tangents[0], -tangent), axis=0)
-      frame = compute_notwistframe(tangents_,
-                                   n0=normal_proj)
-
-      frames.append(frame[-1] @ np.diag([1, -1, -1]))
-
-    # frames = compute_notwistframe(tangents,
-    #                               n0=normal_proj)
-
-    return frames
 
 
 def compute_bif_input(artery):
@@ -266,33 +186,6 @@ def compute_bif_input(artery):
       bifs.append(bif)
 
     return tuple(bifs)
-
-
-# todo: add a test when the vector are on xy plane, the normal has to be (0,0,1)
-def compute_orientation(tangents):
-    """
-    Compute the orientation for a general number of tangents.
-
-    Args:
-        tangents (list of np.ndarray): List of tangent vectors for each branch.
-
-    Returns:
-        dict: A dictionary containing the computed normal and combined tangent.
-    """
-    if len(tangents) < 2:
-        raise ValueError("At least two tangents are required to compute orientation.")
-
-    # Normalize the tangents
-    tangents = [normalize(tangent) for tangent in tangents]
-
-    # Compute the normal as a mix of the tangents
-    normal = np.zeros_like(tangents[0])
-
-    for i in range(len(tangents) - 1):
-        cross_product = np.cross(tangents[0], tangents[i + 1])
-        normal += cross_product
-
-    return normalize(normal)
 
 
 def plot_bifurcation(artery):

@@ -2,6 +2,7 @@ from pyhaemo.util import np, _, normalize
 from pyhaemo.mesh import rectilinear, LineMesh, mesh_union
 from pyhaemo.geo import ellipse
 from pyhaemo.log import logger as log
+from geom import compute_frames, estimate_normal
 from aux import compute_bif_input, compute_orientation
 
 import pyvista as pv
@@ -93,28 +94,36 @@ def plot_artery(artery, npoints=1001, plotter=None, show=True):
 
 def plot_frames(artery):
   npoints = 4
-  bifs = compute_bif_input(artery)
+  endpoints = artery.endpoints()
+  tangents = artery.endpoints(dx=1)
 
   cross = mesh_union(*ellipse(1, 1, npoints).quick_sample((4, 4)))
   meshes = []
 
   plotter = plot_artery(artery, npoints=1001, plotter=None, show=False)
 
-  for i, bif in enumerate(bifs):
+  for i, bif in enumerate(artery.nontrivial_bifs):
     if len(bif) < 3:
       continue
-    mypoints = []
-    for j, (point, frame, index) in enumerate(zip(bif.points,
-                                                  bif.compute_frames(),
-                                                  bif.indices)):
+
+    mypoints = [ endpoints[i] for i in bif ]
+    mytangents = [ tangents[i] * (1 if i > 0 else -1) for i in bif ]
+    mynormal = estimate_normal(mypoints)
+    myframes = compute_frames(mytangents, mynormal)
+
+    for j, (point, frame, index) in enumerate(zip(mypoints,
+                                                  myframes,
+                                                  bif)):
       rad = artery.radii[abs(index)-1]
       cline = artery.centerlines[abs(index)-1]
+
       myradius = rad([rad.knotvector[0].knots[0 if index > 0 else -1]])
       direction = normalize(cline([cline.knots[0][-1 if index > 0 else 0]], dx=1).ravel())
 
       arrow = pv.Arrow(start=point,
                        direction=direction,
                        scale=max(float(myradius), 0.2))
+
       plotter.add_mesh(arrow, color='purple', line_width=1)
       plotter.add_points(point[_], color='red')
       plotter.add_point_labels(point[_], [str(j)])
@@ -126,12 +135,11 @@ def plot_frames(artery):
         arrow = pv.Arrow(start=point, direction=vec, scale=float(myradius))
         plotter.add_mesh(arrow, color=color, line_width=1, label="Frame")
 
-      mypoints.append(point)
-    centerpoint = sum(mypoints) / len(mypoints)
+    centerpoint = np.mean(mypoints, axis=0)
     plotter.add_points(centerpoint[_], color='red')
     plotter.add_point_labels(centerpoint[_], [str(i)])
     normal = pv.Arrow(start=centerpoint,
-                      direction=bif.normal,
+                      direction=mynormal,
                       scale=0.3)
     plotter.add_mesh(normal, color='black', line_width=1, label="Normal")
 

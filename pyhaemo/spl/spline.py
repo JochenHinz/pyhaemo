@@ -398,6 +398,10 @@ class NDSpline(Spline, metaclass=NDSplineMeta):
     """
     return self.controlpoints.reshape(self.knotvector.dim + self.shape)
 
+  def reparameterize(self, *args, **kwargs):
+    kvnew = self.knotvector.reparameterize(*args, **kwargs)
+    return self._edit(knotvector=kvnew)
+
   def transpose_dependencies(self, axes: AnyIntSeq) -> Self:
     """
     Reorder the dependencies of the spline according to the given axes.
@@ -1040,6 +1044,7 @@ class NDSplineArray(Spline):
   refine: Callable
   ref_by: Callable
   add_knots: Callable
+  reparameterize: Callable
   raise_multiplicities: Callable
 
   # properties inherited via `__getattr__` vectorization
@@ -1192,6 +1197,7 @@ class NDSplineArray(Spline):
 
   transpose_dependencies = _vectorize_method_one_arg('transpose_dependencies')
   insert_dependencies = _vectorize_method_one_arg('insert_dependencies')
+  reparameterize = _vectorize_method_one_arg('reparameterize')
 
   @cached_property
   def knotvector(self) -> NDArray:

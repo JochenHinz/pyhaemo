@@ -42,11 +42,11 @@ class NDSplineMeta(ImmutableMeta):
 
     # create the methods that are inherited from the knotvector
     # and subsequently prolonged to the new knotvector
-    for name in ('refine', 'ref_by', 'add_knots', 'raise_multiplicities'):
+    for name in 'refine', 'ref_by', 'add_knots', 'raise_multiplicities':
       setattr(cls, name, forward_and_refine(name))
 
     # add the properties that are inherited from the knotvector
-    for name in ('knots', 'km', 'degree', 'repeated_knots', 'greville'):
+    for name in 'knots', 'km', 'degree', 'repeated_knots', 'greville':
       setattr(cls, name, wrap_property(name))
 
     return cls

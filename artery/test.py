@@ -7,9 +7,9 @@ from itertools import chain
 def plot_swc_data():
   filename = "data/swc_files/BH0004.CNG.swc"
   artery = Artery.from_swc(filename)
-  # artery = artery.create_proximity_tree(eps=1e-3)
-  import ipdb
-  ipdb.set_trace()
+  artery = artery.create_proximity_tree(eps=1e-3)
+  # import ipdb
+  # ipdb.set_trace()
   # artery.plot_pyvista()
   artery.plot_mesh(dx=0.75)
 
@@ -17,10 +17,9 @@ def plot_swc_data():
 def plot_csv_data():
   artery = Artery.from_csv("data/centerlines_csv") \
                  .chordlength_parameterize() \
-                 .create_proximity_tree(0.2)
+                 .create_proximity_tree(0.2).biftruncate(rfac=3).orient()
   # artery = artery.take( list(chain(*artery.nontrivial_bifs[:2] )) )
-  artery = artery.biftruncate()
-  artery.plot_mesh()
+  # artery.plot_mesh()
   # import ipdb
   # ipdb.set_trace()
 
