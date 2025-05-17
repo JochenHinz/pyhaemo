@@ -1,3 +1,5 @@
+from hmac import new
+from operator import index
 from pyhaemo.util import np, clparam
 from pyhaemo.types import Immutable, Int
 from pyhaemo.spl import NDSpline, UnivariateKnotVector
@@ -189,6 +191,41 @@ class Artery(Immutable):
       radii[key-1] = self.radii[key-1].split(0, xvals=vals)[index]
 
     return self._edit(centerlines=centerlines, radii=radii)
+
+
+  def find_small_edge(self):
+
+    indeces_to_delete = []
+    for i, (cline, radius) in enumerate(zip(self.centerlines, self.radii)):
+      if centerline_length(cline) < np.mean(radius.knots[0][[0, -1]]):
+        indeces_to_delete.append(i+1)
+
+    if indeces_to_delete:
+        for myindex in indeces_to_delete:
+            self = self.delete_edge(myindex)
+    return self
+
+
+  def delete_edge(self, index_to_delete=None):
+
+    new_centerlines = [cline for i, cline in enumerate(self.centerlines) if i != index_to_delete]
+    new_radii = [radius for i, radius in enumerate(self.radii) if i != index_to_delete]
+
+    new_bifs = []
+    for bif in map(list,self.bifurcations):
+        my_bif = []
+        for myindex in bif:
+          if abs(myindex) < index_to_delete:
+            my_bif.append(myindex)
+          elif abs(myindex) > index_to_delete:
+            my_bif.append(myindex - 1 if myindex > 0 else myindex + 1)
+
+        new_bifs.append(tuple(my_bif)) if len(my_bif) > 0 else None
+
+    return self._edit(centerlines=new_centerlines,
+                      radii=new_radii,
+                      bifurcations=new_bifs)
+
 
   def biftruncate(self, rfac=2.5, eps=1e-9):
     """
