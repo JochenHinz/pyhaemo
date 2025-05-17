@@ -252,7 +252,7 @@ class Artery(Immutable):
 
     return self.truncate_edges(**kwargs)
 
-  def bifcut(self, eps=1e-9, fac=.05):
+  def bifcut(self, eps=1e-9, fac=.05, nref=3):
     assert 0 < fac < 1
     endpoints = self.endpoints()
     kwargs = {}
@@ -263,11 +263,12 @@ class Artery(Immutable):
         kwargs.setdefault(abs(i), [None, None])
 
         if np.sort( np.linalg.norm(mypoints - point, axis=1) )[1] < eps:
-          myknots = self.centerlines[abs(i)-1].knots[0]
+          a, b = self.centerlines[abs(i)-1].knots[0][0], self.centerlines[abs(i)-1].knots[0][-1]
+          myknots = self.centerlines[abs(i)-1].knotvector[0].refine(nref).knots[1:-1]
           if i < 0:
-            kwargs[abs(i)][0] = myknots[0] + fac * (myknots[-1] - myknots[0])
+            kwargs[abs(i)][0] = myknots[np.argmin(np.abs(a + fac * (b - a) - myknots))]
           else:
-            kwargs[abs(i)][1] = myknots[-1] - fac * (myknots[-1] - myknots[0])
+            kwargs[abs(i)][1] = myknots[np.argmin(np.abs(b - fac * (b - a) - myknots))]
     return self.truncate_edges(**{str(k): v for k, v in kwargs.items()})
 
   def take(self, indices):
