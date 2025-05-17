@@ -1,5 +1,5 @@
-from pyhaemo.util import np, clparam
-from pyhaemo.spl import UnivariateKnotVector, TensorKnotVector, NDSpline
+from pyhaemo.util import np
+from pyhaemo.spl import TensorKnotVector, NDSpline
 from scipy import sparse
 from numpy.typing import NDArray
 

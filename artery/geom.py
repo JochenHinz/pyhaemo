@@ -35,7 +35,7 @@ def estimate_normal(points: NDArray | Sequence[NDArray]) -> NDArray:
 
   # Estimate normal using PCA
   u, s, vh = np.linalg.svd(points - center)
-  normal = vh[2]  # smallest principal component = normal to plane
+  normal = vh[-1]  # smallest principal component = normal to plane
 
   return normalize(normal)
 

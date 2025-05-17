@@ -1,20 +1,11 @@
 from pyhaemo.util import np, _
-from pyhaemo.types import Int, Float, Numeric
+from pyhaemo.types import Numeric
 from pyhaemo.util import normalize
-from pyhaemo.spl import NDSplineArray, NDSpline, UnivariateKnotVector, \
-                        TensorKnotVector
-from pyhaemo.geo.disc import PATCHES, ellipse
+from pyhaemo.spl import NDSplineArray, NDSpline
 from pyhaemo.geo.interp import cubic_hermite_interpolation
-from pyhaemo.geo.aux import spline_or_array
-from pyhaemo.nutils import NutilsInterface
 from pyhaemo.geo.bif import quarter_disc, join_quarters, hermite_pols_interval, hermite_nonconstant_tangent
 
-from functools import lru_cache
-from collections import namedtuple
-from typing import Tuple, Callable, Sequence, Optional
-
-from nutils import function
-from numpy.typing import ArrayLike
+from typing import Sequence
 
 
 def bif_from_matrices(matrices: Sequence[np.ndarray],

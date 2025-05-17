@@ -112,14 +112,15 @@ def make_mesh(artery: Artery, nelems_cross=4) -> NDSplineArray:
                                      constrain_tangents=False) )
 
   vessels = []
-  for cline, radius, rRs in zip(artery.centerlines,
-                                artery.radii,
-                                notwists):
+  for i, (cline, radius, rRs) in enumerate(zip(artery.centerlines,
+                                               artery.radii,
+                                               notwists)):
     vessel = (cross[:, _] @ rRs[_]).sum(-1) + (cross.unity @ cline)
     vessels.append(vessel)
 
   bifsplines = []
-  for bif in artery.nontrivial_bifs:
+  for i, bif in enumerate(artery.nontrivial_bifs):
+    print(i)
     mypoints = [endpoints[i] for i in bif]
     myradii = [endpoint_radii[i] for i in bif]
     myframes = [frames[i] for i in bif]
@@ -147,19 +148,28 @@ def plot_mesh(vessels: Sequence[NDSplineArray],
                                                  6)).ravel(), boundary=True) )
   mesh = mesh_union(*meshes, boundary=True)
   mesh.plot()
+  # mesh.boundary.interfaces.plot()
 
 
 if __name__ == '__main__':
-  artery = Artery.from_csv("data/centerlines_csv") \
+  artery = Artery.from_csv("data/csv/coro/") \
                  .chordlength_parameterize() \
-                 .create_proximity_tree(0.15) \
-                 .biftruncate(rfac=3) \
+                 .create_proximity_tree(0.3) \
+                 .biftruncate(rfac=5) \
                  .reparameterize()
+  # artery = Artery.from_swc("data/swc_files/BG001.CNG.swc") \
+  #                .chordlength_parameterize() \
+  #                .create_proximity_tree(0.005) \
+  #                .biftruncate(rfac=3) \
+  #                .reparameterize()
+  print(len(artery.nontrivial_bifs))
+  artery.plot_pyvista()
   # artery = artery.take(artery.nontrivial_bifs[3])
   artery = artery.orient()
   lengths = [centerline_length(cline) for cline in artery.centerlines]
-  dx = 0.1
+  dx = 0.02
   nsteps_z = [max(int(length / dx), 2) for length in lengths]
+  print(nsteps_z)
 
   vessels, bifs = make_mesh(artery)
   plot_mesh(vessels, bifs, nsteps_z, npoints_cross=5)
