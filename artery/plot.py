@@ -139,7 +139,7 @@ def plot_frames(artery):
 
       arrow = pv.Arrow(start=point,
                        direction=direction,
-                       scale=max(float(myradius), 0.2))
+                       scale=max(float(myradius), 0.1))
 
       plotter.add_mesh(arrow, color='purple', line_width=1)
       plotter.add_points(point[_], color='red')
@@ -157,7 +157,7 @@ def plot_frames(artery):
     plotter.add_point_labels(centerpoint[_], [str(i)])
     normal = pv.Arrow(start=centerpoint,
                       direction=mynormal,
-                      scale=0.3)
+                      scale=0.1)
     plotter.add_mesh(normal, color='black', line_width=1, label="Normal")
 
   final_mesh = mesh_union(*meshes)

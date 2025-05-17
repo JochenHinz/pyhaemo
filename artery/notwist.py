@@ -1,4 +1,4 @@
-from pyhaemo.util import np, normalize, isincreasing, _
+from pyhaemo.util import np, normalize, isincreasing
 from pyhaemo.spl import NDSpline
 
 from typing import Optional, Sequence

@@ -12,6 +12,7 @@ from plot import plot_frames, plot_artery
 from connectivity import _create_proximity_tree
 
 from itertools import chain, count
+from functools import cached_property
 from typing import Tuple, Sequence
 import os
 
@@ -87,6 +88,11 @@ class Artery(Immutable):
 
     assert len( tuple(chain(*self.bifurcations)) ) == len(self.centerlines) * 2
     assert tuple(sorted(set(map(abs, chain(*self.bifurcations))))) == tuple(range(1, nedges+1))
+    assert all( all(-i not in bif for i in bif) for bif in self.bifurcations )
+
+  @cached_property
+  def all_indices(self):
+    return tuple(range(-self.nedges, 0)) + tuple(range(1, self.nedges + 1))
 
   def normalize(self):
     lengths = [ centerline_length(cline) for cline in self.centerlines ]
@@ -240,6 +246,9 @@ class Artery(Immutable):
     endpoints = self.endpoints()
 
     for bif in self.nontrivial_bifs:
+      # if bif == (-14, -15, 22, -24):
+      #   import ipdb
+      #   ipdb.set_trace()
       points = []
 
       for index in bif:
@@ -280,6 +289,24 @@ class Artery(Immutable):
 
     return self.truncate_edges(**kwargs)
 
+  def bifcut(self, eps=1e-9, fac=.05):
+    assert 0 < fac < 1
+    endpoints = self.endpoints()
+    kwargs = {}
+    for bif in self.nontrivial_bifs:
+      mypoints = np.stack([endpoints[index] for index in bif])
+      for i, point in zip(bif, mypoints):
+
+        kwargs.setdefault(abs(i), [None, None])
+
+        if np.sort( np.linalg.norm(mypoints - point, axis=1) )[1] < eps:
+          myknots = self.centerlines[abs(i)-1].knots[0]
+          if i < 0:
+            kwargs[abs(i)][0] = myknots[0] + fac * (myknots[-1] - myknots[0])
+          else:
+            kwargs[abs(i)][1] = myknots[-1] - fac * (myknots[-1] - myknots[0])
+    return self.truncate_edges(**{str(k): v for k, v in kwargs.items()})
+
   def take(self, indices):
     indices = tuple(map(abs, indices))
     assert set(indices).issubset(set(range(1, self.nedges + 1)))
@@ -306,12 +333,25 @@ class Artery(Immutable):
     bifs = []
     for i, bif in enumerate(self.nontrivial_bifs):
       mypoints = np.stack([endpoints[index] for index in bif])
-      if len(cKDTree(mypoints).query_pairs(0.001)):
+      if len(cKDTree(mypoints).query_pairs(0.0001)):
         raise ValueError("Duplicate points in bifurcation")
       shuffle = sort_ccw([endpoints[index] for index in bif])
       bifs.append( tuple(bif[i] for i in shuffle) )
 
     return self._edit(bifurcations=bifs)
+
+  def delete_edge(self, iedge):
+    assert 1 <= iedge <= self.nedges
+    centerlines = self.centerlines[:iedge] + self.centerlines[iedge+1:]
+    radii = self.radii[:iedge] + self.radii[iedge+1:]
+
+    bifs = []
+    for bif in self.nontrivial_bifs:
+      bifs.append(tuple((index if index < iedge else index - 1) for index in bif if index != iedge))
+
+    return self._edit(centerlines=centerlines,
+                      radii=radii,
+                      bifurcations=bifs)
 
 
 if __name__ == '__main__':
