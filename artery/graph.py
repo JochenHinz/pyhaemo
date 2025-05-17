@@ -1,12 +1,9 @@
 from pyhaemo.types import frozen, normalize, np, _, frozen_cached_property
 from pyhaemo.types import Immutable
-from pyhaemo.spl import NDSpline
 
 from notwistframe import compute_notwistframe
 from artery import Artery
 from aux import compute_orientation, project_onto_plane
-
-from typing import Sequence
 
 from numpy.typing import NDArray
 

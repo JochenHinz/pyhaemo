@@ -1,5 +1,6 @@
 from artery import Artery
 from plot import plot_frames
+from aux import centerline_length
 
 
 def plot_swc_data():
@@ -15,16 +16,28 @@ def plot_swc_data():
 def plot_csv_data():
   artery = Artery.from_csv("data/csv/brain") \
                  .chordlength_parameterize() \
-                 .create_proximity_tree(0.15) \
-                 .biftruncate(rfac=3) \
-                 .orient()
-  # artery = artery.take( list(chain(*artery.nontrivial_bifs[:2] )) )
-  artery.plot_mesh()
-  # import ipdb
-  # ipdb.set_trace()
+                 .normalize() \
+                 .create_proximity_tree(0.05)
 
-  # artery = artery.take(artery.nontrivial_bifs[5])
-  plot_frames(artery)
+  artery = artery.bifcut()
+  artery = artery.biftruncate(rfac=2)
+
+  # plot_frames(artery)
+
+  from connectivity import biftruncate
+  for bif in artery.nontrivial_bifs:
+    artery = biftruncate(artery, bif, distances=0.1)
+
+  from mesh import make_mesh, plot_mesh
+
+  artery = artery.orient()
+  # plot_frames(artery)
+
+  vessels, bifs = make_mesh(artery)
+  lengths = [centerline_length(cline) for cline in artery.centerlines]
+  dx = 0.02
+  nsteps_z = [max(int(length / dx), 2) for length in lengths]
+  plot_mesh(vessels, bifs, nsteps_z, npoints_cross=5)
 
   # artery.biftruncate().plot_mesh()
 

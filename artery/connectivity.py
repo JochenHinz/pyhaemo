@@ -1,8 +1,12 @@
 from pyhaemo.util import np, _, _round_array
+from pyhaemo.types import Numeric, Int
 
 from itertools import combinations
+from typing import Dict, Sequence
 
 from numpy.typing import NDArray
+
+from scipy import optimize
 
 
 def fill_diagonal(arr: NDArray, val: float) -> NDArray:
@@ -28,28 +32,30 @@ def _create_proximity_tree(artery, eps=1e-5, nref=4):
                 )
 
   # TODO: This triple for loop needs to be simplified
+
+  # itertate over all nontrivial bifurcations and make sure that the endpoint
+  # distance is set to infinity on the bifurcation endpoint pairs.
   for bif in artery.nontrivial_bifs:
     for edges in combinations(bif, 2):
       for e0, e1 in (edges, edges[::-1]):
         endpoint_diffs[abs(e0)-1,
-                       abs(e1)-1,
-                       0 if e0 < 0 else 1,
-                       0 if e1 < 0 else 1] = np.inf
+                       abs(e1)-1] = np.inf
+        # 0 if e0 < 0 else 1,
+        # 0 if e1 < 0 else 1] = np.inf
   ####
 
   argmin = np.unravel_index( np.argmin(endpoint_diffs), endpoint_diffs.shape )
+  iedge0, iedge1, endpoint0, endpoint1 = argmin
+
+  iedge0 = (iedge0 + 1) * ((-1) ** (endpoint0 + 1))
+  iedge1 = (iedge1 + 1) * ((-1) ** (endpoint1 + 1))
+
+  bif0, bif1 = map(artery.get_bif, (iedge0, iedge1))
 
   # we found a match at an endpoint, we do not split an edge but just
   # create a new bifurcation
-  if endpoint_diffs[argmin] < eps:
-    iedge0, iedge1, endpoint0, endpoint1 = argmin
-
-    iedge0 = (iedge0 + 1) * ((-1) ** (endpoint0 + 1))
-    iedge1 = (iedge1 + 1) * ((-1) ** (endpoint1 + 1))
-
-    bif0, bif1 = map(artery.get_bif, (iedge0, iedge1))
-
-    new_bifs = tuple( bif for bif in artery.nontrivial_bifs if bif not in (bif0, bif1) ) + ((*bif0, *bif1),)
+  if endpoint_diffs[argmin] < eps and all(-i not in bif1 for i in bif0):
+    new_bifs = tuple(bif for bif in artery.nontrivial_bifs if bif not in (bif0, bif1)) + ((*bif0, *bif1),)
     return artery._edit( bifurcations=new_bifs ).create_proximity_tree(eps=eps, nref=nref)
 
   # TODO: This block is too verbose
@@ -91,15 +97,79 @@ def _create_proximity_tree(artery, eps=1e-5, nref=4):
     newindex = artery.nedges + 1
     index_map = {i+1: newindex}
 
-    new_bifs = tuple( tuple(index_map.get(k, k) for k in bif)
-                      for bif in artery.bifurcations[:bifindex] + artery.bifurcations[bifindex+1:] )
+    new_bifs = tuple( tuple(index_map.get(k, k) for k in bif) for bif in
+                      artery.bifurcations[:bifindex] + artery.bifurcations[bifindex+1:] )
 
     new_bifs = new_bifs + ((*bif, i+1, -newindex),)
 
     ret = artery._edit(centerlines=centerlines,
                        radii=radii,
                        bifurcations=new_bifs)
+
     return ret.create_proximity_tree(eps=eps, nref=nref)
 
   else:
     return artery
+
+
+def biftruncate(artery, bif: Sequence[Int], distances: Dict[Int, Numeric] | Numeric, eps=0.03):
+  """
+  Truncate the artery at the bifurcation with the given index.
+  """
+
+  if np.isscalar(distances):
+    distances = {i: distances for i in bif}
+
+  bif, = (_bif for _bif in artery.nontrivial_bifs if set(_bif) == set(bif))
+  assert set(distances.keys()) == set(bif)
+
+  splines = [ artery.centerlines[abs(i) - 1] for i in bif ]
+  bounds = tuple( (0, spl.knots[0][-1] - spl.knots[0][0]) for spl in splines )
+  distances = np.array([ distances[i] for i in bif ])
+  intervals = [ spl.knots[0][-1] - spl.knots[0][0] for spl in splines ]
+
+  splfuncs = []
+  for i, spl in zip(bif, splines):
+    if i > 0:
+      def func(x, spl=spl):
+        root = spl.knots[0][-1]
+        return spl(np.atleast_1d(root - x)).reshape(-1, 3)
+    else:
+      def func(x, spl=spl):
+        root = spl.knots[0][0]
+        return spl(np.atleast_1d(root + x)).reshape(-1, 3)
+
+    splfuncs.append(func)
+
+  def costfunc(displacements: NDArray):
+    evals = np.array([spl(x).ravel() for spl, x in zip(splfuncs, displacements)])
+    centroid = np.mean(evals, axis=0)
+
+    mydistances = np.linalg.norm(evals - centroid, axis=1)
+
+    ret = ((mydistances - distances)**2).sum()
+    return ret
+
+  centroid = np.mean([splfunc(0).ravel() for splfunc in splfuncs], axis=0)
+
+  initial_guess = []
+  for func, mydist, (a, upper_bound) in zip(splfuncs, distances, bounds):
+    xi = np.linspace(0, upper_bound, 101)
+    initial_guess.append( xi[((func(xi) - centroid) ** 2).sum(1).argmin()] )
+
+  sol = optimize.minimize(costfunc, initial_guess, bounds=bounds)
+
+  print(sol.success)
+  x = sol.x
+
+  kwargs = {}
+
+  for i, spl, displ, intv in zip(bif, splines, x, intervals):
+    if displ < eps * intv or displ > (1 - eps) * intv:
+      continue
+    if i > 0:
+      kwargs[str(i)] = None, spl.knots[0][-1] - displ
+    else:
+      kwargs[str(-i)] = spl.knots[0][0] + displ, None
+
+  return artery.truncate_edges(**kwargs)
