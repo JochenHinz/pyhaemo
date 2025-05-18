@@ -1,3 +1,5 @@
+from re import sub
+from networkx import radius
 from pyhaemo.util import np, clparam
 from pyhaemo.types import Immutable, Int
 from pyhaemo.spl import NDSpline, UnivariateKnotVector
@@ -5,7 +7,7 @@ from pyhaemo.geo.interp import linear_interpolation
 from pyhaemo.log import logger as log
 
 from datahandler import csv_converter, swc_converter
-from aux import centerline_length
+from aux import centerline_length, distance
 from plot import plot_frames, plot_artery
 from preprocessing import _create_proximity_tree
 
@@ -287,7 +289,55 @@ class Artery(Immutable):
                       radii=radii,
                       centerlines=centerlines)
 
-  def biftruncate(self, rfac=2.5, eps=1e-9):
+
+  def find_distance(self, subset, factor=2):
+    """
+    Given a subset of length 2 of a bifurcation.
+
+    It finds the points of the centerlines that have a certain distance.
+    """
+    assert len(subset) == 2
+
+    eval = np.linspace(0, 1, 1000)
+    myvalues = [self.centerlines[abs(val) - 1](eval) if val < 0 else self.centerlines[abs(val) - 1](eval[::-1]) for val in subset]
+    myradii = [self.radii[abs(val) - 1]([1 if val > 0 else 0]) for val in subset]
+
+    criterium = factor*max(myradii) - 1
+    index = 0
+    while (criterium <= factor*max(myradii)):
+      criterium = np.abs(distance(myvalues[0][index], myvalues[1][index]))
+      index += 1
+
+    param = {subset[0]: index/len(eval) if subset[0] < 0 else 1 - index/len(eval),
+             subset[1]: index/len(eval) if subset[1] < 0 else 1 - index/len(eval)}
+
+    return param
+
+
+  def biftruncate(self, factor=2):
+
+    kwargs = dict(zip(range(1, self.nedges + 1), ([None, None] for _ in range(self.nedges))))
+
+    for bif in self.nontrivial_bifs:
+      subsets = list(combinations(bif, 2))
+
+      param_list = []
+      for myset in subsets:
+        param = self.find_distance(myset, factor)
+        param_list.append(param)
+
+      for key in bif:
+        values = [d[key] for d in param_list if key in d]
+        if key > 0:
+          kwargs[abs(key)][1] = min(values)
+        else:
+          kwargs[abs(key)][0] = max(values)
+
+    kwargs = {str(key): val for key, val in kwargs.items()}
+
+    return self.truncate_edges(**kwargs)
+
+  def biftruncate_(self, rfac=2.5, eps=1e-9):
     """
     Truncate the centerlines and radii at the bifurcations such that their
     distance to the bifurcation is at least rfac times the radius of the
@@ -296,7 +346,7 @@ class Artery(Immutable):
     Assumes that the centerlines are arc-length parameterized.
     """
     kwargs = dict(zip(range(1, self.nedges + 1), ([None, None] for _ in range(self.nedges))))
-
+    
     endpoints = self.endpoints()
 
     for bif in self.nontrivial_bifs:
