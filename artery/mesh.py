@@ -120,7 +120,7 @@ def make_mesh(artery: Artery, nelems_cross=4) -> NDSplineArray:
 
   bifsplines = []
   for i, bif in enumerate(artery.nontrivial_bifs):
-    print(i)
+    #print(i)
     mypoints = [endpoints[i] for i in bif]
     myradii = [endpoint_radii[i] for i in bif]
     myframes = [frames[i] for i in bif]
@@ -147,18 +147,18 @@ def plot_mesh(vessels: Sequence[NDSplineArray],
                                                  npoints_cross,
                                                  6)).ravel(), boundary=True) )
   mesh = mesh_union(*meshes, boundary=True)
-  mesh.plot()
+  #mesh.plot()
   # mesh.boundary.interfaces.plot()
-
+  mesh.export_gmsh("mesh.vtk")
 
 if __name__ == '__main__':
   artery = Artery.from_csv("data/csv/coro/") \
                  .chordlength_parameterize() \
                  .create_proximity_tree(0.3) \
-                 .biftruncate(rfac=3) \
-                 .delete_small_edges()
+                 .reparameterize() \
+                 .biftruncate(factor=2) 
+                 #.delete_small_edges()
 
-  artery = artery.reparameterize() \
   # artery = Artery.from_swc("data/swc_files/BG001.CNG.swc") \
   #                .chordlength_parameterize() \
   #                .create_proximity_tree(0.005) \
