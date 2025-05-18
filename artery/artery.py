@@ -7,7 +7,7 @@ from pyhaemo.log import logger as log
 from datahandler import csv_converter, swc_converter
 from aux import centerline_length
 from plot import plot_frames, plot_artery
-from connectivity import _create_proximity_tree
+from preprocessing import _create_proximity_tree
 
 from itertools import chain, count, combinations
 from functools import cached_property
@@ -109,7 +109,11 @@ class Artery(Immutable):
     for bif in self.nontrivial_bifs:
       for pair in combinations(bif, 2):
         pairs.append(tuple(sorted(pair)))
-    return tuple(pairs)
+    return tuple(pairs) + tuple( pair[::-1] for pair in pairs )
+
+  @property
+  def abs_endpoint_pairs(self):
+    return tuple(set(tuple(map(abs, pair)) for pair in self.endpoint_pairs))
 
   @cached_property
   def all_indices(self):
@@ -141,10 +145,34 @@ class Artery(Immutable):
     """
     Get the bifurcation that conains the index.
     """
-    ret, = [ (i, bif) for i, bif in enumerate(self.bifurcations) if index in bif ]
-    if not return_index:
-      return ret[1]
+    if not hasattr(self, '__bifmap'):
+      bifmap = {}
+      for i, bif in enumerate(self.bifurcations):
+        for bifindex in bif:
+          bifmap[bifindex] = i
+      self.__bifmap = bifmap
+    bifindex = self.__bifmap[index]
+    ret = self.bifurcations[bifindex]
+    if return_index:
+      return bifindex, ret
     return ret
+
+  def merge_bifs(self, i0: Int, i1: Int):
+    bif0, bif1 = self.bifurcations[i0], self.bifurcations[i1]
+    if len(bif0) == 1 and len(bif1) == 1:
+      assert bif0[0] != -bif1[0]
+
+    intersection = set(map(abs, bif0)) & set(map(abs, bif1))
+
+    if intersection:
+      log.warning(f"Bifmerge deleted the following edges: {sorted(intersection)}")
+
+    new_bifs = [bif for bif in self.bifurcations if bif not in (bif0, bif1)] + \
+               [(*(i for i in bif0 if abs(i) not in intersection),
+                 *(i for i in bif1 if abs(i) not in intersection))]
+
+    return self._edit(bifurcations=new_bifs) \
+               .delete_edges(list(intersection))
 
   def reparameterize(self):
     """
@@ -237,15 +265,25 @@ class Artery(Immutable):
 
     return self
 
-  def delete_edge(self, iedge: Int):
+  def delete_edges(self, iedges: Int | Sequence[Int]):
 
-    iedge = abs(iedge)
+    if isinstance(iedges, Int):
+      iedges = iedges,
 
-    centerlines = self.centerlines[:iedge-1] + self.centerlines[iedge:]
-    radii = self.radii[:iedge-1] + self.radii[iedge:]
-    bifs = [ tuple(i for i in bif if abs(i) != iedge) for bif in self.bifs ]
+    iedges = tuple(map(abs, iedges))
+    assert len(set(iedges)) == len(iedges)
 
-    return self._edit(bifurcations=renumber_bifs([b for b in bifs if b], self.nedges-1),
+    if not iedges:
+      return self
+
+    iedges = set(iedges)
+
+    centerlines = [ cline for i, cline in enumerate(self.centerlines, 1)
+                    if i not in iedges ]
+    radii = [ r for i, r in enumerate(self.radii, 1) if i not in iedges ]
+    bifs = [ tuple(i for i in bif if abs(i) not in iedges) for bif in self.bifs ]
+
+    return self._edit(bifurcations=renumber_bifs([b for b in bifs if b], self.nedges-len(iedges)),
                       radii=radii,
                       centerlines=centerlines)
 
