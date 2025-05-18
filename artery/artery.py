@@ -1,5 +1,3 @@
-from hmac import new
-from operator import index
 from pyhaemo.util import np, clparam
 from pyhaemo.types import Immutable, Int
 from pyhaemo.spl import NDSpline, UnivariateKnotVector
@@ -11,12 +9,27 @@ from aux import centerline_length
 from plot import plot_frames, plot_artery
 from connectivity import _create_proximity_tree
 
-from itertools import chain, count
+from itertools import chain, count, combinations
 from functools import cached_property
 from typing import Tuple, Sequence
 import os
 
 from scipy.spatial import cKDTree
+
+
+def find_closest_knot(knotvector: UnivariateKnotVector, val: float, nref=3,
+                                                                    interior=False):
+  knots = knotvector.refine(nref).knots
+  if interior:
+    assert len(knots) > 2
+    knots = knots[1:-1]
+  return knots[np.argmin(np.abs(knots - val))]
+
+
+def renumber_bifs(bifurcations: Sequence[Sequence[Int]], nedges: Int):
+  map_index = dict(zip(sorted(set(map(abs, chain(*bifurcations)))), count(1)))
+  map_index = {**map_index, **{-k: -v for k, v in map_index.items()}}
+  return tuple( tuple(map(map_index.__getitem__, bif)) for bif in bifurcations )
 
 
 class Artery(Immutable):
@@ -90,9 +103,21 @@ class Artery(Immutable):
     assert tuple(sorted(set(map(abs, chain(*self.bifurcations))))) == tuple(range(1, nedges+1))
     assert all( all(-i not in bif for i in bif) for bif in self.bifurcations )
 
+  @property
+  def endpoint_pairs(self):
+    pairs = []
+    for bif in self.nontrivial_bifs:
+      for pair in combinations(bif, 2):
+        pairs.append(tuple(sorted(pair)))
+    return tuple(pairs)
+
   @cached_property
   def all_indices(self):
     return tuple(range(-self.nedges, 0)) + tuple(range(1, self.nedges + 1))
+
+  @property
+  def bifs(self):
+    return self.bifurcations
 
   def normalize(self):
     lengths = [ centerline_length(cline) for cline in self.centerlines ]
@@ -198,40 +223,31 @@ class Artery(Immutable):
 
     return self._edit(centerlines=centerlines, radii=radii)
 
+  def delete_small_edges(self, eps=1):
+    assert eps > 0
 
-  def find_small_edge(self):
-
-    indeces_to_delete = []
+    delindices = []
     for i, (cline, radius) in enumerate(zip(self.centerlines, self.radii)):
-      if centerline_length(cline) < np.mean(radius.knots[0][[0, -1]]):
-        indeces_to_delete.append(i+1)
+      if centerline_length(cline) < eps * np.mean(radius(radius.knots[0][[0, -1]])):
+        delindices.append(i+1)
 
-    if indeces_to_delete:
-        for myindex in indeces_to_delete:
-            self = self.delete_edge(myindex)
+    # do in reverse because edges bigger than the deleted edge are renumbered
+    for i in reversed(delindices):
+      self = self.delete_edge(i)
+
     return self
 
+  def delete_edge(self, iedge: Int):
 
-  def delete_edge(self, index_to_delete=None):
+    iedge = abs(iedge)
 
-    new_centerlines = [cline for i, cline in enumerate(self.centerlines) if i != index_to_delete]
-    new_radii = [radius for i, radius in enumerate(self.radii) if i != index_to_delete]
+    centerlines = self.centerlines[:iedge-1] + self.centerlines[iedge:]
+    radii = self.radii[:iedge-1] + self.radii[iedge:]
+    bifs = [ tuple(i for i in bif if abs(i) != iedge) for bif in self.bifs ]
 
-    new_bifs = []
-    for bif in map(list,self.bifurcations):
-        my_bif = []
-        for myindex in bif:
-          if abs(myindex) < index_to_delete:
-            my_bif.append(myindex)
-          elif abs(myindex) > index_to_delete:
-            my_bif.append(myindex - 1 if myindex > 0 else myindex + 1)
-
-        new_bifs.append(tuple(my_bif)) if len(my_bif) > 0 else None
-
-    return self._edit(centerlines=new_centerlines,
-                      radii=new_radii,
-                      bifurcations=new_bifs)
-
+    return self._edit(bifurcations=renumber_bifs([b for b in bifs if b], self.nedges-1),
+                      radii=radii,
+                      centerlines=centerlines)
 
   def biftruncate(self, rfac=2.5, eps=1e-9):
     """
@@ -246,9 +262,6 @@ class Artery(Immutable):
     endpoints = self.endpoints()
 
     for bif in self.nontrivial_bifs:
-      # if bif == (-14, -15, 22, -24):
-      #   import ipdb
-      #   ipdb.set_trace()
       points = []
 
       for index in bif:
@@ -301,11 +314,11 @@ class Artery(Immutable):
 
         if np.sort( np.linalg.norm(mypoints - point, axis=1) )[1] < eps:
           a, b = self.centerlines[abs(i)-1].knots[0][0], self.centerlines[abs(i)-1].knots[0][-1]
-          myknots = self.centerlines[abs(i)-1].knotvector[0].refine(nref).knots[1:-1]
+          mykv, = self.centerlines[abs(i)-1].knotvector
           if i < 0:
-            kwargs[abs(i)][0] = myknots[np.argmin(np.abs(a + fac * (b - a) - myknots))]
+            kwargs[abs(i)][0] = find_closest_knot(mykv, a + fac * (b - a), nref=nref, interior=True)
           else:
-            kwargs[abs(i)][1] = myknots[np.argmin(np.abs(b - fac * (b - a) - myknots))]
+            kwargs[abs(i)][1] = find_closest_knot(mykv, b - fac * (b - a), nref=nref, interior=True)
     return self.truncate_edges(**{str(k): v for k, v in kwargs.items()})
 
   def take(self, indices):
@@ -327,8 +340,14 @@ class Artery(Immutable):
                       radii=radii,
                       bifurcations=bifs)
 
-  def orient(self):
+  def orient(self, rfac=0):
     from geom import sort_ccw
+
+    _self = self
+
+    if rfac:
+      self = self.biftruncate(rfac=rfac)
+
     endpoints = self.endpoints()
 
     bifs = []
@@ -339,20 +358,7 @@ class Artery(Immutable):
       shuffle = sort_ccw([endpoints[index] for index in bif])
       bifs.append( tuple(bif[i] for i in shuffle) )
 
-    return self._edit(bifurcations=bifs)
-
-  def delete_edge(self, iedge):
-    assert 1 <= iedge <= self.nedges
-    centerlines = self.centerlines[:iedge] + self.centerlines[iedge+1:]
-    radii = self.radii[:iedge] + self.radii[iedge+1:]
-
-    bifs = []
-    for bif in self.nontrivial_bifs:
-      bifs.append(tuple((index if index < iedge else index - 1) for index in bif if index != iedge))
-
-    return self._edit(centerlines=centerlines,
-                      radii=radii,
-                      bifurcations=bifs)
+    return _self._edit(bifurcations=bifs)
 
 
 if __name__ == '__main__':

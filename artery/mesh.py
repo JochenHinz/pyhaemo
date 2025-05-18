@@ -155,19 +155,24 @@ if __name__ == '__main__':
   artery = Artery.from_csv("data/csv/coro/") \
                  .chordlength_parameterize() \
                  .create_proximity_tree(0.3) \
-                 .biftruncate(rfac=5) \
-                 .reparameterize()
+                 .biftruncate(rfac=3) \
+                 .delete_small_edges()
+
+  artery = artery.reparameterize() \
   # artery = Artery.from_swc("data/swc_files/BG001.CNG.swc") \
   #                .chordlength_parameterize() \
   #                .create_proximity_tree(0.005) \
   #                .biftruncate(rfac=3) \
   #                .reparameterize()
-  print(len(artery.nontrivial_bifs))
-  artery.plot_pyvista()
+  print(artery.nontrivial_bifs)
+  # artery.plot_pyvista()
+
+  # import ipdb
+  # ipdb.set_trace()
   # artery = artery.take(artery.nontrivial_bifs[3])
   artery = artery.orient()
   lengths = [centerline_length(cline) for cline in artery.centerlines]
-  dx = 0.02
+  dx = 0.05
   nsteps_z = [max(int(length / dx), 2) for length in lengths]
   print(nsteps_z)
 

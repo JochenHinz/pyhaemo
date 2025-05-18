@@ -158,7 +158,7 @@ def compute_distance_matrix(mesh0: 'Mesh', mesh1: 'Mesh', eps: float = 1e-6):
   tree0 = _compute_kdtree(mesh0)
   tree1 = _compute_kdtree(mesh1)
 
-  mat = tree0.sparse_distance_matrix(tree1, max_distance=eps).tocsr().tocoo().tocsr()
+  mat = tree0.sparse_distance_matrix(tree1, max_distance=eps).tocsr()
 
   data1 = mat.data.copy()
   data1[:] = 1
@@ -175,24 +175,6 @@ def make_matching(mesh0: 'Mesh', mesh1: 'Mesh', eps: float = 1e-8) -> IntArray:
   Make a matching of two meshes' points based on proximity.
   """
   return _make_matching(*compute_distance_matrix(mesh0, mesh1, eps))
-
-
-def make_matching_(mesh0: 'Mesh', mesh1: 'Mesh', eps: float = 1e-8) -> IntArray:
-  """
-  Make a matching of two meshes' points based on proximity.
-  """
-  tree0 = _compute_kdtree(mesh0)
-  tree1 = _compute_kdtree(mesh1)
-
-  mat = tree0.sparse_distance_matrix(tree1, max_distance=eps).tocsr()
-
-  data1 = mat.data.copy()
-  data1[:] = 1
-  mat1 = csr_matrix((data1, mat.indices, mat.indptr), shape=mat.shape)
-
-  if (mat1.sum(0) > 1.5).any() or (mat1.sum(1) > 1.5).any():
-    raise ValueError("More than one point is closer than the matching tolerance. Reduce the tolerance.")
-  return np.stack(mat1.tocoo().coords, axis=1)
 
 
 def match_active(mesh0: 'Mesh', mesh1: 'Mesh', eps: float = 1e-8) -> IntArray:

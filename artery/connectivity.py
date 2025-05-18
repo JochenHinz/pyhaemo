@@ -40,8 +40,6 @@ def _create_proximity_tree(artery, eps=1e-5, nref=4):
       for e0, e1 in (edges, edges[::-1]):
         endpoint_diffs[abs(e0)-1,
                        abs(e1)-1] = np.inf
-        # 0 if e0 < 0 else 1,
-        # 0 if e1 < 0 else 1] = np.inf
   ####
 
   argmin = np.unravel_index( np.argmin(endpoint_diffs), endpoint_diffs.shape )

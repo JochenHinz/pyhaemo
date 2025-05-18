@@ -227,11 +227,11 @@ def plot_bifurcation(artery):
     plt.show()
 
 
-def centerline_length(centerline: NDSpline) -> float:
+def centerline_length(centerline: NDSpline, npoints=1001) -> float:
   """
   Compute the length of a centerline spline using the Gauss points.
   """
   xi, = centerline.knotvector.gauss_abscissae
   assert len(xi) > 1
   x = centerline(xi)
-  return ((np.diff(x, axis=0)**2).sum(1) ** .5).sum()
+  return np.linalg.norm(x[1:] - x[:-1], axis=1).sum()
