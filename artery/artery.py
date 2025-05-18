@@ -289,7 +289,6 @@ class Artery(Immutable):
                       radii=radii,
                       centerlines=centerlines)
 
-
   def find_distance(self, subset, factor=2):
     """
     Given a subset of length 2 of a bifurcation.
@@ -312,7 +311,6 @@ class Artery(Immutable):
              subset[1]: index/len(eval) if subset[1] < 0 else 1 - index/len(eval)}
 
     return param
-
 
   def biftruncate(self, factor=2):
 
@@ -346,7 +344,7 @@ class Artery(Immutable):
     Assumes that the centerlines are arc-length parameterized.
     """
     kwargs = dict(zip(range(1, self.nedges + 1), ([None, None] for _ in range(self.nedges))))
-    
+
     endpoints = self.endpoints()
 
     for bif in self.nontrivial_bifs:

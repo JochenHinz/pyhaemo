@@ -23,19 +23,19 @@ def plot_csv_data():
   ipdb.set_trace()
 
   artery = split_edges_proximity(artery, eps=0.08)
-  artery = bifmerge(artery, eps=0.2)
+  artery = bifmerge(artery, eps=0.2).reparameterize()
 
   # artery.plot_pyvista()
 
   # artery = artery.create_proximity_tree(eps=0.1, endpoint_fac=1.5)
   # artery = artery.bifcut()
-  artery = artery.biftruncate(rfac=1.5)
+  artery = artery.biftruncate()
 
   # plot_frames(artery)
 
-  from connectivity import biftruncate
-  for bif in artery.nontrivial_bifs:
-    artery = biftruncate(artery, bif, distances=0.04)
+  # from connectivity import biftruncate
+  # for bif in artery.nontrivial_bifs:
+  #   artery = biftruncate(artery, bif, distances=0.04)
 
   from mesh import make_mesh, plot_mesh
 

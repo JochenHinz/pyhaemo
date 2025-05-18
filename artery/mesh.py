@@ -147,9 +147,8 @@ def plot_mesh(vessels: Sequence[NDSplineArray],
                                                  npoints_cross,
                                                  6)).ravel(), boundary=True) )
   mesh = mesh_union(*meshes, boundary=True)
-  #mesh.plot()
+  mesh.plot()
   # mesh.boundary.interfaces.plot()
-  mesh.export_gmsh("mesh.vtk")
 
 if __name__ == '__main__':
   artery = Artery.from_csv("data/csv/coro/") \
