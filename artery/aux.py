@@ -18,47 +18,47 @@ def distance(arr0: np.ndarray, arr1: np.ndarray) -> np.ndarray:
 
 
 def project_onto_plane(points, normal):
-    """
-    Project 3D points onto a plane defined by a normal vector.
+  """
+  Project 3D points onto a plane defined by a normal vector.
 
-    Args:
-        points (np.ndarray): Array of 3D points with shape (n, 3).
-        normal (np.ndarray): Normal vector of the plane.
+  Args:
+      points (np.ndarray): Array of 3D points with shape (n, 3).
+      normal (np.ndarray): Normal vector of the plane.
 
-    Returns:
-        np.ndarray: Projected 2D points.
-    """
-    normal = normalize(normal)
-    projection_matrix = np.eye(3) - np.outer(normal, normal)
-    return points @ projection_matrix.T
+  Returns:
+      np.ndarray: Projected 2D points.
+  """
+  normal = normalize(normal)
+  projection_matrix = np.eye(3) - np.outer(normal, normal)
+  return points @ projection_matrix.T
 
 
 # todo: add a test when the vector are on xy plane, the normal has to be (0,0,1)
 def compute_orientation(tangents):
-    """
-    Compute the orientation for a general number of tangents.
+  """
+  Compute the orientation for a general number of tangents.
 
-    Args:
-        tangents (list of np.ndarray): List of tangent vectors for each branch.
+  Args:
+      tangents (list of np.ndarray): List of tangent vectors for each branch.
 
-    Returns:
-        dict: A dictionary containing the computed normal and combined tangent.
-    """
-    # Normalize the tangents
-    tangents = normalize(tangents)
+  Returns:
+      dict: A dictionary containing the computed normal and combined tangent.
+  """
+  # Normalize the tangents
+  tangents = normalize(tangents)
 
-    if len(tangents) == 1:
-      # TODO: think about a linear operation that takes the vector (0, 0, 1)
-      #       to (1, 0, 0)
-      (a, b, c), = tangents
-      return normalize(np.array([1, 1, -(b + a) / c])[_])
+  if len(tangents) == 1:
+    # TODO: think about a linear operation that takes the vector (0, 0, 1)
+    #       to (1, 0, 0)
+    (a, b, c), = tangents
+    return normalize(np.array([1, 1, -(b + a) / c])[_])
 
-    if len(tangents) < 2:
-        if np.allclose(np.abs(np.dot(*tangents)), 1):
-          log.warning("The two tangents are parallel. Returning a default normal.")
-        return compute_orientation(tangents[:1])
+  if len(tangents) < 2:
+      if np.allclose(np.abs(np.dot(*tangents)), 1):
+        log.warning("The two tangents are parallel. Returning a default normal.")
+      return compute_orientation(tangents[:1])
 
-    return normalize( np.cross(tangents[0], tangents[1:]).sum(0) )
+  return normalize( np.cross(tangents[0], tangents[1:]).sum(0) )
 
 
 class Bifurcation(Immutable):
@@ -128,103 +128,103 @@ class Bifurcation(Immutable):
 
 
 def compute_bif_input(artery):
-    """
-    Computes the frames, points, tangents, and bifurcation order for a given bifurcation.
-    Parameters:
-    -----------
-    lines : list of callable
-        A list of functions representing the parametric curves of the lines.
-        Each function takes a single parameter (e.g., `eval`) and returns the
-        corresponding point on the curve.
-    radii : list of callable
-        A list of functions representing the radii of the lines. Each function
-        takes a single parameter (e.g., `[k]`) and returns the radius at that
-        point.
-    bif : iterable
-        An iterable of integers representing the bifurcation configuration.
-        Positive integers indicate forward direction, and negative integers
-        indicate reverse direction.
-    Returns:
-    --------
-    frames : list
-        A list of computed frames for the bifurcation.
-    points_clockwise : list
-        A list of points ordered in a clockwise manner around the bifurcation.
-    tangents_clockwise : list
-        A list of tangent vectors ordered in a clockwise manner around the bifurcation.
-    bif_clockwise : list
-        A list of bifurcation indices ordered in a clockwise manner.
-    Notes:
-    ------
-    - The function assumes a shape of (, , , ) and processes the bifurcation
-      configuration accordingly.
-    - The `find_clock_wise_order` function is used to determine the clockwise
-      order of points, tangents, and bifurcation indices.
-    - The `compute_frames` function is used to compute the frames based on the
-      normal vector, points, and tangents.
-    """
-    centerlines = artery.centerlines
-    bifurcations = artery.nontrivial_bifs
+  """
+  Computes the frames, points, tangents, and bifurcation order for a given bifurcation.
+  Parameters:
+  -----------
+  lines : list of callable
+      A list of functions representing the parametric curves of the lines.
+      Each function takes a single parameter (e.g., `eval`) and returns the
+      corresponding point on the curve.
+  radii : list of callable
+      A list of functions representing the radii of the lines. Each function
+      takes a single parameter (e.g., `[k]`) and returns the radius at that
+      point.
+  bif : iterable
+      An iterable of integers representing the bifurcation configuration.
+      Positive integers indicate forward direction, and negative integers
+      indicate reverse direction.
+  Returns:
+  --------
+  frames : list
+      A list of computed frames for the bifurcation.
+  points_clockwise : list
+      A list of points ordered in a clockwise manner around the bifurcation.
+  tangents_clockwise : list
+      A list of tangent vectors ordered in a clockwise manner around the bifurcation.
+  bif_clockwise : list
+      A list of bifurcation indices ordered in a clockwise manner.
+  Notes:
+  ------
+  - The function assumes a shape of (, , , ) and processes the bifurcation
+    configuration accordingly.
+  - The `find_clock_wise_order` function is used to determine the clockwise
+    order of points, tangents, and bifurcation indices.
+  - The `compute_frames` function is used to compute the frames based on the
+    normal vector, points, and tangents.
+  """
+  centerlines = artery.centerlines
+  bifurcations = artery.nontrivial_bifs
 
-    bifs = []
+  bifs = []
 
-    for bifindices in bifurcations:
-      mytangents, mypoints = [], []
+  for bifindices in bifurcations:
+    mytangents, mypoints = [], []
 
-      for val in bifindices:
-        k = 0 if val < 0 else 1
-        myline = centerlines[abs(val) - 1]
-        startpoint = myline.knots[0][-k]
+    for val in bifindices:
+      k = 0 if val < 0 else 1
+      myline = centerlines[abs(val) - 1]
+      startpoint = myline.knots[0][-k]
 
-        # by convention we have the tangent point into the bifurcation
-        mytangents.append(normalize(myline([startpoint], dx=1).ravel() * (1 if val > 0 else -1)))
-        mypoints.append(myline([startpoint]).ravel())
+      # by convention we have the tangent point into the bifurcation
+      mytangents.append(normalize(myline([startpoint], dx=1).ravel() * (1 if val > 0 else -1)))
+      mypoints.append(myline([startpoint]).ravel())
 
-      bif = Bifurcation(mypoints, mytangents, bifindices).orient()
-      bifs.append(bif)
+    bif = Bifurcation(mypoints, mytangents, bifindices).orient()
+    bifs.append(bif)
 
-    return tuple(bifs)
+  return tuple(bifs)
 
 
 def plot_bifurcation(artery):
-    """
-    Plot the bifurcation geometry for a given artery and bifurcation configuration.
+  """
+  Plot the bifurcation geometry for a given artery and bifurcation configuration.
 
-    Parameters:
-    ----------
-    artery : object
-        An object representing the artery geometry. It should provide the `compute_bif_input` function.
-    ax : matplotlib.axes.Axes, optional
-        The axes on which to plot the bifurcation. If None, a new figure and axes will be created.
+  Parameters:
+  ----------
+  artery : object
+      An object representing the artery geometry. It should provide the `compute_bif_input` function.
+  ax : matplotlib.axes.Axes, optional
+      The axes on which to plot the bifurcation. If None, a new figure and axes will be created.
 
-    Returns:
-    -------
-    ax : matplotlib.axes.Axes
-        The axes on which the bifurcation is plotted.
-    """
+  Returns:
+  -------
+  ax : matplotlib.axes.Axes
+      The axes on which the bifurcation is plotted.
+  """
 
-    # Compute the frames, points, tangents, and bifurcation configuration
-    all_frames, all_points, _, _, _ = compute_bif_input(artery)
+  # Compute the frames, points, tangents, and bifurcation configuration
+  all_frames, all_points, _, _, _ = compute_bif_input(artery)
 
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
+  fig = plt.figure()
+  ax = fig.add_subplot(111, projection='3d')
 
-    ax.set_box_aspect([1, 1, 1])  # Aspect ratio is 1:1:1
+  ax.set_box_aspect([1, 1, 1])  # Aspect ratio is 1:1:1
 
-    # Plot the bifurcation geometry
-    for myframes, mypoints in zip(all_frames, all_points):
-      for frame, point in zip(myframes, mypoints):
+  # Plot the bifurcation geometry
+  for myframes, mypoints in zip(all_frames, all_points):
+    for frame, point in zip(myframes, mypoints):
 
-        # Plot the point itself
-        ax.scatter(*point, color='red', s=50)
+      # Plot the point itself
+      ax.scatter(*point, color='red', s=50)
 
-        # Plot the frame at each point using the frame's columns as vectors
-        for j, vec in enumerate(frame.T):
-            ax.quiver(*point, *vec,
-                      color=['blue', 'green', 'orange'][j],  # Different colors for each axis
-                      length=1.0, normalize=True)
+      # Plot the frame at each point using the frame's columns as vectors
+      for j, vec in enumerate(frame.T):
+        ax.quiver(*point, *vec,
+                  color=['blue', 'green', 'orange'][j],  # Different colors for each axis
+                  length=1.0, normalize=True)
 
-    plt.show()
+  plt.show()
 
 
 def centerline_length(centerline: NDSpline, npoints=1001) -> float:

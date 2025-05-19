@@ -1,7 +1,7 @@
 from pyhaemo.util import np, _, normalize
 from pyhaemo.spl import NDSplineArray, NDSpline
 from pyhaemo.geo import ellipse
-from pyhaemo.geo.bif import repeated_knot_disc
+from pyhaemo.geo.bif import repeated_knot_disc, bif_from_matrices
 import pyvista as pv
 
 from typing import Sequence
@@ -11,27 +11,9 @@ from geom import estimate_normal, compute_frames
 from notwist import compute_notwistframe
 from artery import Artery
 from solve import fit_constrained
-from bif import bif_from_matrices
 
 from numpy.typing import NDArray
 from pyhaeme_nfur import find_butterfly_line
-
-
-def make_bif_(points: NDArray,
-              radii: NDArray,
-              frames: NDArray,
-              cross: NDArray) -> NDSplineArray:
-
-  # ax
-  normal = estimate_normal(points)
-  xC = np.mean(points, axis=0)
-  bB = bT = np.mean(radii)
-
-  matrices = [f * r for f, r in zip(frames, radii)]
-  matrices = [m @ np.array([ [0, 1, 0], [-1, 0, 0], [0, 0, 1] ]) for m in matrices]
-
-  return bif_from_matrices( matrices[::-1], points[::-1], normal, xC, bB, bT,
-                            unitdisc=cross )
 
 
 def plot_frames(frames, radii, points, xC, normal):
@@ -58,7 +40,7 @@ def make_bif(points: NDArray,
              frames: NDArray,
              cross: NDArray) -> NDSplineArray:
   points, radii, frames = map(np.asarray, (points, radii, frames))
-  # ax
+
   x_top, xC, x_bot = find_butterfly_line(radii, points, frames)
   # normal = normalize( x_top - x_bot )
   normal = estimate_normal(points)
@@ -66,7 +48,6 @@ def make_bif(points: NDArray,
 
   # x becomes y and y becomes -x
   matrices = [f @ np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]]) for f in frames]
-  # plot_frames(matrices, radii, points, np.mean(points, axis=0), normal)
 
   matrices = [m * r for m, r in zip(matrices, radii)]
 
@@ -120,7 +101,6 @@ def make_mesh(artery: Artery, nelems_cross=4) -> NDSplineArray:
 
   bifsplines = []
   for i, bif in enumerate(artery.nontrivial_bifs):
-    #print(i)
     mypoints = [endpoints[i] for i in bif]
     myradii = [endpoint_radii[i] for i in bif]
     myframes = [frames[i] for i in bif]
@@ -147,15 +127,17 @@ def plot_mesh(vessels: Sequence[NDSplineArray],
                                                  npoints_cross,
                                                  6)).ravel(), boundary=True) )
   mesh = mesh_union(*meshes, boundary=True)
+  print('npoints', len(mesh.points))
   mesh.plot()
   # mesh.boundary.interfaces.plot()
+
 
 if __name__ == '__main__':
   artery = Artery.from_csv("data/csv/coro/") \
                  .chordlength_parameterize() \
                  .create_proximity_tree(0.3) \
                  .reparameterize() \
-                 .biftruncate(factor=2) 
+                 .biftruncate(factor=2)
                  #.delete_small_edges()
 
   # artery = Artery.from_swc("data/swc_files/BG001.CNG.swc") \

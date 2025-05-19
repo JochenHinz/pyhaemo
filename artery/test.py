@@ -1,7 +1,7 @@
 from artery import Artery
 from plot import plot_frames
 from aux import centerline_length
-from preprocessing import split_edges_proximity, bifmerge
+from preprocessing import split_edges_proximity, bifmerge, biftruncate_opt_r
 
 
 def plot_swc_data():
@@ -19,23 +19,16 @@ def plot_csv_data():
                  .chordlength_parameterize() \
                  .normalize()
 
-  import ipdb
-  ipdb.set_trace()
-
   artery = split_edges_proximity(artery, eps=0.08)
-  artery = bifmerge(artery, eps=0.2).reparameterize()
 
-  # artery.plot_pyvista()
-
-  # artery = artery.create_proximity_tree(eps=0.1, endpoint_fac=1.5)
-  # artery = artery.bifcut()
-  artery = artery.biftruncate()
-
-  # plot_frames(artery)
+  artery = bifmerge(artery, eps=0.15).reparameterize()
+  artery = artery.biftruncate(rfac=2.5)
 
   # from connectivity import biftruncate
   # for bif in artery.nontrivial_bifs:
-  #   artery = biftruncate(artery, bif, distances=0.04)
+  #   artery = biftruncate_opt_r(artery, bif, rfac=1.2)
+
+  # artery.plot_pyvista()
 
   from mesh import make_mesh, plot_mesh
 
@@ -45,9 +38,9 @@ def plot_csv_data():
 
   vessels, bifs = make_mesh(artery)
   lengths = [centerline_length(cline) for cline in artery.centerlines]
-  dx = 0.02
+  dx = 0.025
   nsteps_z = [max(int(length / dx), 2) for length in lengths]
-  plot_mesh(vessels, bifs, nsteps_z, npoints_cross=5)
+  plot_mesh(vessels, bifs, nsteps_z, npoints_cross=7)
 
   # artery.biftruncate().plot_mesh()
 

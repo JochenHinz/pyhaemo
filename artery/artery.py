@@ -9,7 +9,6 @@ from pyhaemo.log import logger as log
 from datahandler import csv_converter, swc_converter
 from aux import centerline_length, distance
 from plot import plot_frames, plot_artery
-from preprocessing import _create_proximity_tree
 
 from itertools import chain, count, combinations
 from functools import cached_property
@@ -173,8 +172,7 @@ class Artery(Immutable):
                [(*(i for i in bif0 if abs(i) not in intersection),
                  *(i for i in bif1 if abs(i) not in intersection))]
 
-    return self._edit(bifurcations=new_bifs) \
-               .delete_edges(list(intersection))
+    return self._edit(bifurcations=new_bifs).delete_edges(list(intersection))
 
   def reparameterize(self):
     """
@@ -216,9 +214,6 @@ class Artery(Immutable):
   @property
   def nontrivial_bifs(self):
     return tuple( bif for bif in self.bifurcations if len(bif) > 1 )
-
-  def create_proximity_tree(self, *args, **kwargs):
-    return _create_proximity_tree(self, *args, **kwargs)
 
   def plot_pyvista(self, npoints=1001, **kwargs):
     return plot_artery(self, npoints=npoints, **kwargs)
@@ -289,7 +284,7 @@ class Artery(Immutable):
                       radii=radii,
                       centerlines=centerlines)
 
-  def find_distance(self, subset, factor=2):
+  def find_distance(self, subset, rfac=2):
     """
     Given a subset of length 2 of a bifurcation.
 
@@ -298,12 +293,16 @@ class Artery(Immutable):
     assert len(subset) == 2
 
     eval = np.linspace(0, 1, 1000)
-    myvalues = [self.centerlines[abs(val) - 1](eval) if val < 0 else self.centerlines[abs(val) - 1](eval[::-1]) for val in subset]
-    myradii = [self.radii[abs(val) - 1]([1 if val > 0 else 0]) for val in subset]
+    clines = [self.centerlines[abs(val) - 1] for val in subset]
+    radii = [self.radii[abs(val) - 1] for val in subset]
+    myvalues = [cline(eval)[slice(None) if val < 0 else slice(None, None, -1)]
+                for val, cline in zip(subset, clines)]
 
-    criterium = factor*max(myradii) - 1
+    myradii = [r([1 if val > 0 else 0]) for val, r in zip(subset, radii)]
+
+    criterium = rfac*max(myradii) - 1
     index = 0
-    while (criterium <= factor*max(myradii)):
+    while (criterium <= rfac*max(myradii)):
       criterium = np.abs(distance(myvalues[0][index], myvalues[1][index]))
       index += 1
 
@@ -312,16 +311,15 @@ class Artery(Immutable):
 
     return param
 
-  def biftruncate(self, factor=2):
+  def biftruncate(self, rfac=2):
 
     kwargs = dict(zip(range(1, self.nedges + 1), ([None, None] for _ in range(self.nedges))))
 
     for bif in self.nontrivial_bifs:
-      subsets = list(combinations(bif, 2))
 
       param_list = []
-      for myset in subsets:
-        param = self.find_distance(myset, factor)
+      for myset in combinations(bif, 2):
+        param = self.find_distance(myset, rfac)
         param_list.append(param)
 
       for key in bif:
