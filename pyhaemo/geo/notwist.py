@@ -1,9 +1,11 @@
+from numpy import dtype
 from pyhaemo.util import np, normalize, isincreasing
 from pyhaemo.spl import NDSpline
 
 from typing import Optional, Sequence
 
 from numba import njit
+import numba.np.extensions as ext
 import treelog as log
 
 
@@ -15,6 +17,20 @@ def normalize_vector(vec):
 @njit
 def clip(value, a, b):
   return min(max(value, a), b)
+
+
+@njit(cache=True)
+def rotate_vector(v, u, theta):
+  """Eulero Rodrigues formula for rotating a vector v
+     around an axis u of an angle theta.
+  """
+
+  u = normalize_vector(u)
+  v_rot = v * np.cos(theta) + \
+          np.cross(u, v) * np.sin(theta) + \
+          u * np.dot(u, v) * (1 - np.cos(theta))
+
+  return v_rot
 
 
 @njit(cache=True)
@@ -58,15 +74,8 @@ def _compute_notwistframe(T, n0, zero_thresh):
       omega = omega / norm
       phi = np.arccos(clip(np.dot(told, tnew), -1.0, 1.0))
 
-      binormal_p = Rs[i-1][:, 1]
-      binormal = binormal_p * np.cos(phi) + \
-                 np.cross(omega, binormal_p) * np.sin(phi) + \
-                 omega * np.dot(omega, binormal_p) * (1 - np.cos(phi))
-
-      normal_p = Rs[i-1][:, 0]
-      normal = normal_p * np.cos(phi) + \
-               np.cross(omega, normal_p) * np.sin(phi) + \
-               omega * np.dot(omega, normal_p) * (1 - np.cos(phi))
+      binormal = rotate_vector(Rs[i-1][:, 1], omega, phi)
+      normal = rotate_vector(Rs[i-1][:, 0], omega, phi)
 
     Rs[i][:, 0] = normalize_vector(normal)
     Rs[i][:, 1] = normalize_vector(binormal)
@@ -75,24 +84,72 @@ def _compute_notwistframe(T, n0, zero_thresh):
   return Rs
 
 
+@njit(cache=True)
+def _compute_notwistframe_end_to_end(T, n0, nfinal, zero_thresh):
+  """
+    Notwistframe where both ends are fixed.
+  """
+
+  n0 = normalize_vector(n0)
+  nfinal = normalize_vector(nfinal)
+
+  # compute the forward notwistframe
+  Rs_forward = _compute_notwistframe(T, n0, zero_thresh)
+
+  # express the final normal in the local coordinate system
+  nfinal_loc = np.linalg.solve(Rs_forward[-1], nfinal)
+
+  assert np.allclose(np.abs(nfinal_loc[-1]), 0)
+
+  # compute the angle between the two local normals on the last section
+  # between (-pi, pi]
+  angle0 = np.arctan2(ext.cross2d(np.array([1, 0]), nfinal_loc[:2]),
+                      np.array([1, 0], dtype=np.float64) @ nfinal_loc[:2])
+
+  # check if one of the options is closer to 0
+  options = angle0 + np.linspace(-np.pi, np.pi, 5)[:-1]
+
+  # keep it
+  myangle = options[np.argmin(np.abs(options))]
+
+  ans = np.empty_like(Rs_forward)
+  for i, R in enumerate(Rs_forward):
+    binormal = R @ rotate_vector(np.array([1.0, 0.0, 0.0], dtype=np.float64),
+                                 np.array([0.0, 0.0, 1.0], dtype=np.float64),
+                                 myangle * i / (len(Rs_forward) - 1))
+
+    normal = R @ rotate_vector(np.array([0.0, 1.0, 0.0], dtype=np.float64),
+                               np.array([0.0, 0.0, 1.0], dtype=np.float64),
+                               myangle * i / (len(Rs_forward) - 1))
+
+    ans[i] = np.stack((binormal, normal, T[i]), axis=1)
+
+  return ans
+
+
 def compute_notwistframe(tangents: np.ndarray,
                          n0: Optional[np.ndarray | Sequence[float]] = None,
+                         nfinal: Optional[np.ndarray | Sequence[float]] = None,
                          zero_thresh: float = 1e-8) -> np.ndarray:
   """
     Compute a discrete no-twist-frame.
     The docstring is the same as for `_compute_notwistframe` but `n0` and
     `zero_thresh` receive reasonable default values if not passed.
   """
-
   assert (tangents := normalize(tangents)).shape[1:] == (3,)
   assert zero_thresh >= 0
 
-  if n0 is None:
+  if n0 is None and nfinal is None:
     n0 = np.array([-tangents[0, 2], 0, tangents[0, 0]])
+    return _compute_notwistframe(tangents, n0, zero_thresh)
 
-  assert (n0 := np.asarray(n0)).shape == (3,)
-
-  return _compute_notwistframe(tangents, n0, zero_thresh)
+  elif n0 is None:
+    return _compute_notwistframe(tangents[::-1], nfinal, zero_thresh)[::-1]
+  elif nfinal is None:
+    return _compute_notwistframe(tangents, n0, zero_thresh)
+  else:
+    assert (nfinal := np.asarray(nfinal)).shape == (3,)
+    return _compute_notwistframe_end_to_end(tangents, n0, nfinal, zero_thresh)
 
 
 def compute_notwistframe_from_spline(spline: NDSpline,
