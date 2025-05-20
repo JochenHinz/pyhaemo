@@ -2,6 +2,8 @@ from pyhaemo.util import np, _, normalize
 from pyhaemo.spl import NDSplineArray, NDSpline
 from pyhaemo.geo import ellipse
 from pyhaemo.geo.bif import repeated_knot_disc, bif_from_matrices
+from pyhaemo.geo.interp import cubic_hermite_interpolation as cubic_hermite_curve
+
 import pyvista as pv
 
 from typing import Sequence
@@ -12,7 +14,6 @@ from artery import Artery
 from solve import fit_constrained
 
 from numpy.typing import NDArray
-from pyhaeme_nfur import find_butterfly_line
 
 
 def plot_frames(frames, radii, points, xC, normal):
@@ -33,6 +34,73 @@ def plot_frames(frames, radii, points, xC, normal):
   plotter.add_mesh(n, color='black', line_width=1, label="Normal")
   plotter.show()
 
+def find_butterfly_line(radii, points, frames):
+
+ tangents = frames[:, -1]
+
+ left, right, center, top, bottom = [], [], [], [], []
+ n_branches = len(points)
+
+ for i in range(n_branches):
+   left.append(points[i] - radii[i] * frames[i][:, 1])
+   right.append(points[i] + radii[i] * frames[i][:, 1])
+   center.append(points[i])
+   top.append(points[i] + radii[i] * frames[i][:, 0])
+   bottom.append(points[i] - radii[i] * frames[i][:, 0])
+
+ curves_top = []
+ curves_center = []
+ curves_bottom = []
+ dec_points = []
+ dec_tangents = []
+
+ # TODO: make this scaling a parameter specific for each curve.
+ alpha = 2
+ for i in range(n_branches):
+
+     start_index = i
+     end_index = i + 1 if i < (n_branches-1) else 0
+
+     start_top = NDSpline([], [top[start_index]])
+     end_top = NDSpline([], [top[end_index]])
+
+     start_center = NDSpline([], [center[start_index]])
+     end_center = NDSpline([], [center[end_index]])
+
+     start_bottom = NDSpline([], [bottom[start_index]])
+     end_bottom = NDSpline([], [bottom[end_index]])
+
+     start_tangent = -alpha*radii[start_index] * tangents[start_index]
+     end_tangent = alpha * radii[end_index] * tangents[end_index]
+
+     # Calculate the curve
+     curves_top.append(cubic_hermite_curve(start_top, end_top,
+                                           start_tangent, end_tangent))
+     curves_bottom.append(cubic_hermite_curve(start_bottom, end_bottom, start_tangent, end_tangent))
+     curves_center.append(cubic_hermite_curve(start_center, end_center, start_tangent, end_tangent))
+
+     start = NDSpline([], [[right[start_index]]])
+     end = NDSpline([], [[left[end_index]]])
+
+     # Calculate the curve
+     curve = cubic_hermite_curve(start, end,
+                                 start_tangent, end_tangent)
+
+     dec_points.append((curve([0.5]).reshape(3,)))
+     dec_tangents.append(curve([0.5], dx=1))
+
+ X_top = np.mean([curve([0.5]).reshape(3,) for curve in curves_top], axis=0)
+ X = np.mean([curve([0.5]).reshape(3,) for curve in curves_center], axis=0)
+ X_bottom = np.mean([curve([0.5]).reshape(3,) for curve in curves_bottom], axis=0)
+
+ bT = np.linalg.norm(X_top - X)
+ bB = np.linalg.norm(X_bottom - X)
+ normal = normalize(X_top - X_bottom)
+ assert 1 - 10**-8 < np.abs(np.dot(normalize(X_top - X), normalize(X_bottom - X))) < 1 + 10**-8 , 'X_top, X and X_top must lie on the same line.'
+ assert X_top.shape[0] == X.shape[0] == X_bottom.shape[0] == 3, 'All the decomposition points must be 3D'
+
+ return bT, X, bB, normal
+
 
 def make_bif(points: NDArray,
              radii: NDArray,
@@ -40,10 +108,12 @@ def make_bif(points: NDArray,
              cross: NDArray) -> NDSplineArray:
   points, radii, frames = map(np.asarray, (points, radii, frames))
 
-  x_top, xC, x_bot = find_butterfly_line(radii, points, frames)
+  # x_top, xC, x_bot = find_butterfly_line(radii, points, frames)
   # normal = normalize( x_top - x_bot )
-  normal = estimate_normal(points)
-  bB = bT = np.mean(radii)
+  # normal = estimate_normal(points)
+  # bB = bT = np.mean(radii)
+
+  bT, xC, bB, normal = find_butterfly_line(radii, points, frames)
 
   # x becomes y and y becomes -x
   matrices = [f @ np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]]) for f in frames]
