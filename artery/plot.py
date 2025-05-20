@@ -59,18 +59,21 @@ def plot_artery(artery, npoints=1001, plotter=None, show=True):
   if plotter is None:
     plotter = pv.Plotter()
 
-  for i, centerline in enumerate(artery.centerlines):
-    mesh = rectilinear([np.linspace(*centerline.knots[0][[0, -1]], npoints)])
-    line = centerline.sample_mesh(mesh)
+  for i, cline in enumerate(artery.centerlines, 1):
+    mesh = rectilinear([np.linspace(*cline.knots[0][[0, -1]], npoints)])
+    line = cline.sample_mesh(mesh)
 
     lmesh = line_element(line)
     plotter.add_mesh(lmesh, color="blue", line_width=3, label=str(i))
 
-    point_cloud = pv.PolyData( centerline(centerline.knots[0][[0, -1]]) )
+    point_cloud = pv.PolyData( cline(cline.knots[0][[0, -1]]) )
     plotter.add_mesh(point_cloud, color="red",
                                   point_size=10,
                                   render_points_as_spheres=True,
-                                  label="Points")
+                                  label=str(i) + ' endpoints')
+    centerpoint = cline([np.mean(cline.knots[0][[0, -1]])]).ravel()
+    plotter.add_points(centerpoint[_], color='red')
+    plotter.add_point_labels(centerpoint[_], [str(i)])
 
   xi = np.linspace(0, 1, npoints)
 

@@ -66,27 +66,6 @@ def sort_ccw(points: NDArray | Sequence[NDArray]) -> NDArray:
   return np.argsort(angles)
 
 
-def sort_ccw_(points: NDArray | Sequence[NDArray], normal=None) -> NDArray:
-  if normal is None:
-    normal = estimate_normal(points)
-
-  ppoints = []
-  for point in points:
-    ppoints.append( project_onto_plane(point, normal) )
-
-  ppoints = np.array(ppoints)
-  vectors = normalize(ppoints - np.mean(ppoints, axis=0))
-
-  angles = [0]
-  for i in range(1, len(vectors)):
-    cross = normalize(np.cross(vectors[0], vectors[i]))
-    dots = np.sum(vectors[0] * vectors[i])
-    scalar_prod = (cross * normal).sum()
-    angles.append((+1 if scalar_prod > 0 else -1) * np.arccos(dots))
-
-  return np.argsort(angles)
-
-
 def compute_frames(tangents: NDArray | Sequence[NDArray], normal) -> NDArray:
   t0 = tangents[0]
   normal_proj = normalize(project_onto_plane(normal, t0))
