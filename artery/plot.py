@@ -4,8 +4,8 @@ from pyhaemo.spl import NDSpline, NDSplineArray
 from pyhaemo.geo import ellipse
 from pyhaemo.log import logger as log
 from pyhaemo.geo.notwist import compute_notwistframe
-from geom import compute_frames, estimate_normal
-from aux import compute_bif_input, centerline_length
+from aux import compute_bif_input, centerline_length, \
+                compute_frames, estimate_normal
 
 import pyvista as pv
 import vtk

@@ -7,7 +7,8 @@ from pyhaemo.geo.interp import linear_interpolation
 from pyhaemo.log import logger as log
 
 from datahandler import csv_converter, swc_converter
-from aux import centerline_length, distance
+from aux import centerline_length, distance, sort_ccw
+
 from plot import plot_frames, plot_artery
 
 from itertools import chain, count, combinations
@@ -425,8 +426,6 @@ class Artery(Immutable):
                       bifurcations=bifs)
 
   def orient(self, rfac=0):
-    from geom import sort_ccw
-
     _self = self
 
     if rfac:
