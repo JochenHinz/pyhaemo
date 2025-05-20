@@ -521,6 +521,8 @@ class NDSpline(Spline, metaclass=NDSplineMeta):
           (np.prod([len(po) for pos in positions]),) + self.controlpoints.shape[1:]
         else.
     """
+    if oob != 0:
+      raise NotImplementedError("Out of bounds handling not implemented yet.")
     if isinstance(dx, Int):
       assert self.nvars  # 0-D spline doesn't have any derivatives
       dx = (dx,) * self.nvars

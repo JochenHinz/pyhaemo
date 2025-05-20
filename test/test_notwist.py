@@ -77,5 +77,6 @@ class TestNoTwist(unittest.TestCase):
     #      Find a way to test whether the boundary union etc succeeds without
     #      having to look at it manually.
 
+
 if __name__ == '__main__':
   unittest.main()

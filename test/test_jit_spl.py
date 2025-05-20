@@ -118,7 +118,7 @@ class TestJIT(unittest.TestCase):
     for dx in (0, 1, 2):
       self.assertTrue( np.allclose(spl(xi, eta, tensor=True, dx=dx), 0) )
 
-    self.assertRaises(Exception, spl(xi, eta, oob=1))
+    self.assertRaises(Exception, lambda: spl(xi, eta, oob=1))
 
 
 if __name__ == '__main__':

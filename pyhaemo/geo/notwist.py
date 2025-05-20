@@ -1,4 +1,3 @@
-from numpy import dtype
 from pyhaemo.util import np, normalize, isincreasing
 from pyhaemo.spl import NDSpline
 
