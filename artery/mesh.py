@@ -8,7 +8,7 @@ from typing import Sequence
 
 from aux import centerline_length
 from geom import estimate_normal, compute_frames
-from notwist import compute_notwistframe
+from pyhaemo.geo.notwist import compute_notwistframe
 from artery import Artery
 from solve import fit_constrained
 

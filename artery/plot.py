@@ -3,7 +3,7 @@ from pyhaemo.mesh import rectilinear, LineMesh, mesh_union
 from pyhaemo.spl import NDSpline, NDSplineArray
 from pyhaemo.geo import ellipse
 from pyhaemo.log import logger as log
-from notwist import compute_notwistframe
+from pyhaemo.geo.notwist import compute_notwistframe
 from geom import compute_frames, estimate_normal
 from aux import compute_bif_input, centerline_length
 
