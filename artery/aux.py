@@ -4,8 +4,6 @@ from pyhaemo.geo.notwist import compute_notwistframe
 from pyhaemo.spl import NDSpline
 from pyhaemo.log import logger as log
 
-import matplotlib.pyplot as plt
-
 
 def distance(arr0: np.ndarray, arr1: np.ndarray) -> np.ndarray:
   shp0, shp1 = arr0.shape, arr1.shape
@@ -186,48 +184,7 @@ def compute_bif_input(artery):
   return tuple(bifs)
 
 
-def plot_bifurcation(artery):
-  """
-  Plot the bifurcation geometry for a given artery and bifurcation configuration.
-
-  Parameters:
-  ----------
-  artery : object
-      An object representing the artery geometry. It should provide the `compute_bif_input` function.
-  ax : matplotlib.axes.Axes, optional
-      The axes on which to plot the bifurcation. If None, a new figure and axes will be created.
-
-  Returns:
-  -------
-  ax : matplotlib.axes.Axes
-      The axes on which the bifurcation is plotted.
-  """
-
-  # Compute the frames, points, tangents, and bifurcation configuration
-  all_frames, all_points, _, _, _ = compute_bif_input(artery)
-
-  fig = plt.figure()
-  ax = fig.add_subplot(111, projection='3d')
-
-  ax.set_box_aspect([1, 1, 1])  # Aspect ratio is 1:1:1
-
-  # Plot the bifurcation geometry
-  for myframes, mypoints in zip(all_frames, all_points):
-    for frame, point in zip(myframes, mypoints):
-
-      # Plot the point itself
-      ax.scatter(*point, color='red', s=50)
-
-      # Plot the frame at each point using the frame's columns as vectors
-      for j, vec in enumerate(frame.T):
-        ax.quiver(*point, *vec,
-                  color=['blue', 'green', 'orange'][j],  # Different colors for each axis
-                  length=1.0, normalize=True)
-
-  plt.show()
-
-
-def centerline_length(centerline: NDSpline, npoints=1001) -> float:
+def centerline_length(centerline: NDSpline) -> float:
   """
   Compute the length of a centerline spline using the Gauss points.
   """
