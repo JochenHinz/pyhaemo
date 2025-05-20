@@ -57,12 +57,13 @@ class TestNoTwist(unittest.TestCase):
     n0 = np.array([0, 1, 0]).astype(float)
     nfinal = np.array([0, .5, .5]).astype(float)
 
-    frame = _compute_notwistframe_end_to_end(spl(xi, dx=1),
+    frames = _compute_notwistframe_end_to_end(spl(xi, dx=1),
                                             n0,
                                             nfinal,
                                             1e-8)
 
-    rRs = kv.fit([xi], frame, lam0=0)
+    self.assertTrue( all( (np.abs(np.linalg.det(R)) - 1) < 1e-10 for R in frames ) )
+    rRs = kv.fit([xi], frames, lam0=0)
     ell = ellipse(1, 1, 4)
 
     vessel = (ell[:, None] @ rRs).sum(-1) + ell.unity @ spl
