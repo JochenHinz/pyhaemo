@@ -1,7 +1,6 @@
 from pyhaemo.util import np, _, normalize
 from pyhaemo.spl import NDSplineArray, NDSpline
-from pyhaemo.geo import ellipse
-from pyhaemo.geo.bif import repeated_knot_disc, bif_from_matrices
+from bif import repeated_knot_disc, bif_from_matrices
 from pyhaemo.geo.interp import cubic_hermite_interpolation as cubic_hermite_curve
 
 import pyvista as pv
@@ -33,6 +32,8 @@ def plot_frames(frames, radii, points, xC, normal):
                scale=float( np.mean(radii) ))
   plotter.add_mesh(n, color='black', line_width=1, label="Normal")
   plotter.show()
+  plotter.close()
+
 
 def find_butterfly_line(radii, points, frames):
 
@@ -110,10 +111,13 @@ def make_bif(points: NDArray,
 
   # x_top, xC, x_bot = find_butterfly_line(radii, points, frames)
   # normal = normalize( x_top - x_bot )
-  # normal = estimate_normal(points)
-  # bB = bT = np.mean(radii)
+  normal = estimate_normal(points)
+  bB = bT = np.mean(radii)
+  xC = np.mean(points, axis=0)
 
-  bT, xC, bB, normal = find_butterfly_line(radii, points, frames)
+  # xC = np.sum(points * radii[:, _], axis=0) / np.sum(radii)
+
+  # bT, xC, bB, normal = find_butterfly_line(radii, points, frames)
 
   # x becomes y and y becomes -x
   matrices = [f @ np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]]) for f in frames]
