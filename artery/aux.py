@@ -398,14 +398,12 @@ def find_distance(artery, subset, centroid, rfac=2, npoints=201):
 
   # (npoints, 2, 3)
   ceval = np.stack([cline(evalf) for cline, evalf in zip(clines, evalpoints)], axis=1)
-  r0s = np.array([r([r.knots[0][0 if i < 0 else -1]]).ravel()
-                  for i, r in zip(subset, radii)], dtype=float)
-  maxr = r0s.max()
+  reval = np.stack([r(evalf) for r, evalf in zip(radii, evalpoints)], axis=1)
 
   i, j = 0, 0
   while i < npoints and j < npoints:
-    p0 = ceval[i][0]
-    p1 = ceval[j][1]
+    p0, p1 = ceval[i][0], ceval[j][1]
+    maxr = max(reval[i][0], reval[j][1])
 
     dist = np.linalg.norm(p0 - p1)
     if dist < rfac * maxr:

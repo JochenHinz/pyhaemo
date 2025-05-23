@@ -106,14 +106,16 @@ def find_butterfly_line(radii, points, frames):
 def make_bif(points: NDArray,
              radii: NDArray,
              frames: NDArray,
-             cross: NDArray) -> NDSplineArray:
+             cross: NDArray,
+             xC=None) -> NDSplineArray:
   points, radii, frames = map(np.asarray, (points, radii, frames))
 
   # x_top, xC, x_bot = find_butterfly_line(radii, points, frames)
   # normal = normalize( x_top - x_bot )
   normal = estimate_normal(points)
   bB = bT = np.mean(radii)
-  xC = np.mean(points, axis=0)
+  if xC is None:
+    xC = np.mean(points, axis=0)
 
   # xC = np.sum(points * radii[:, _], axis=0) / np.sum(radii)
 
@@ -128,8 +130,14 @@ def make_bif(points: NDArray,
                             unitdisc=cross )
 
 
-def make_mesh(artery: Artery, nelems_cross=4) -> NDSplineArray:
+def make_mesh(artery: Artery, nelems_cross=4, centroids=None) -> NDSplineArray:
   frames, normals = {}, {}
+
+  if centroids is None:
+    endpoints = artery.endpoints()
+    centroids = [np.mean([endpoints[i] for i in bif], axis=0) for bif in artery.bifurcations]
+
+  assert len(centroids) == len(artery.bifurcations)
 
   endpoints = artery.endpoints()
   endtangents = artery.endpoints(dx=1)
@@ -173,11 +181,13 @@ def make_mesh(artery: Artery, nelems_cross=4) -> NDSplineArray:
     vessels.append(vessel)
 
   bifsplines = []
-  for i, bif in enumerate(artery.nontrivial_bifs):
+  for i, bif in enumerate(artery.bifurcations):
+    if len(bif) in (1, 2):
+      continue
     mypoints = [endpoints[i] for i in bif]
     myradii = [endpoint_radii[i] for i in bif]
     myframes = [frames[i] for i in bif]
-    bifsplines.append( make_bif(mypoints, myradii, myframes, cross) )
+    bifsplines.append( make_bif(mypoints, myradii, myframes, cross, xC=centroids[i]) )
 
   return tuple(vessels), tuple(bifsplines)
 
@@ -199,6 +209,8 @@ def plot_mesh(vessels: Sequence[NDSplineArray],
     meshes.append( mesh_union(*bif.quick_sample((npoints_cross,
                                                  npoints_cross,
                                                  6)).ravel(), boundary=True) )
+  # import ipdb
+  # ipdb.set_trace()
   mesh = mesh_union(*meshes, boundary=True)
   print('npoints', len(mesh.points))
   mesh.plot()

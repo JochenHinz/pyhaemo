@@ -1,3 +1,4 @@
+from pyhaemo.util import np
 from artery import Artery
 from aux import centerline_length, biftruncate
 from preprocessing import split_edges_proximity, bifmerge
@@ -23,6 +24,10 @@ def plot_csv_data():
   artery.plot_pyvista()
 
   artery = bifmerge(artery, eps=0.06).reparameterize()
+
+  endpoints = artery.endpoints()
+  centroids = {frozenset(bif): np.mean([endpoints[i] for i in bif], axis=0) for bif in artery.bifurcations}
+
   artery = biftruncate(artery, rfac=2)
 
   artery.plot_pyvista()
@@ -32,13 +37,14 @@ def plot_csv_data():
   from mesh import make_mesh, plot_mesh
 
   artery = artery.orient()
+  centroids = [ centroids[frozenset(bif)] for bif in artery.bifurcations ]
   # artery.plot_pyvista()
   # plot_frames(artery)
 
-  vessels, bifs = make_mesh(artery)
+  vessels, bifs = make_mesh(artery, centroids=centroids)
   lengths = [centerline_length(cline) for cline in artery.centerlines]
-  dx = 0.025
-  nsteps_z = [max(int(length / dx), 3) for length in lengths]
+  dx = 0.0125
+  nsteps_z = [max(int(length / dx), 5) for length in lengths]
   plot_mesh(vessels, bifs, nsteps_z, npoints_cross=7)
 
   # artery.biftruncate().plot_mesh()
