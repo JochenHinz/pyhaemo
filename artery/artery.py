@@ -1,5 +1,3 @@
-from re import sub
-from networkx import radius
 from pyhaemo.util import np, clparam
 from pyhaemo.types import Immutable, Int
 from pyhaemo.spl import NDSpline, UnivariateKnotVector
@@ -140,7 +138,28 @@ class Artery(Immutable):
     for i, cline in enumerate(self.centerlines, 1):
       ret[i] = cline(cline.knots[0][-1:], dx=dx).ravel()
       ret[-i] = cline(cline.knots[0][:1], dx=dx).ravel()
+    return ret
 
+  def r_endpoints(self):
+    ret = {}
+    for i, r in enumerate(self.radii, 1):
+      ret[i] = r(r.knots[0][-1:]).ravel()
+      ret[-i] = r(r.knots[0][:1]).ravel()
+    return ret
+
+  def r_scaled_centroids(self):
+    """
+    Get the scaled centroids of the centerlines.
+    """
+    endpoints = self.endpoints()
+    rendpoints = self.r_endpoints()
+
+    ret = {}
+    for bif in self.bifurcations:
+      rs = [rendpoints[i] for i in bif]
+      rs = [1] * len(rs)
+      centroid = np.sum([endpoints[i] * r for i, r in zip(bif, rs)], axis=0) / sum(rs)
+      ret[bif] = centroid
     return ret
 
   def get_bif(self, index: Int, return_index=False):
@@ -296,8 +315,7 @@ class Artery(Immutable):
     eval = np.linspace(0, 1, 1000)
     clines = [self.centerlines[abs(val) - 1] for val in subset]
     radii = [self.radii[abs(val) - 1] for val in subset]
-    myvalues = [cline(eval)[slice(None) if val < 0 else slice(None, None, -1)]
-                for val, cline in zip(subset, clines)]
+    myvalues = [cline(eval) if val < 0 else cline(eval)[::-1] for val, cline in zip(subset, clines)]
 
     myradii = [r([1 if val > 0 else 0]) for val, r in zip(subset, radii)]
 

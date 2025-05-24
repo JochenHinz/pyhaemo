@@ -1,4 +1,4 @@
-from pyhaemo.util import np, normalize
+from pyhaemo.util import np, normalize, _
 from pyhaemo.types import Numeric, Int
 from pyhaemo.spl import NDSpline
 
@@ -65,7 +65,7 @@ def split_edges_proximity(artery, eps=1e-5, nref=4, endpoint_fac=1.0):
   for b, (i, a, val) in mindices.items():
     if val < np.linalg.norm(endpoint_dict[i] - endpoint_dict[b]) / endpoint_fac and \
        val < np.linalg.norm(endpoint_dict[-i] - endpoint_dict[b]) / endpoint_fac:
-      split_indices.setdefault(i, []).append(a)
+      split_indices.setdefault(i, set()).add(a)
 
   centerlines, radii = [], []
   for i, (cline, r) in enumerate(zip(artery.centerlines, artery.radii), 1):
@@ -74,8 +74,9 @@ def split_edges_proximity(artery, eps=1e-5, nref=4, endpoint_fac=1.0):
       rs = r,
     else:
       xi = cline.knotvector[0].refine(nref).knots[1:-1]
-      clines = cline.split(0, xvals=xi[split_indices[i]])
-      rs = r.split(0, xvals=xi[split_indices[i]])
+      xvals = xi[sorted(split_indices[i])]
+      clines = cline.split(0, xvals=xvals)
+      rs = r.split(0, xvals=xvals)
     centerlines.extend(clines)
     radii.extend(rs)
 
@@ -255,9 +256,17 @@ def biftruncate_opt_r(artery, bif: Sequence[Int], rfac: Numeric = 1.3, eps=0.03)
         p0, p1 = c0([_x]).ravel(), c1([_y]).ravel()
         _r0, _r1 = r0([_x]).ravel(), r1([_y]).ravel()
 
-        return np.linalg.norm(p0 - p1) - 2 * rfac * max(_r0, _r1)
+        return np.linalg.norm(p0 - p1) - rfac * (_r0 + _r1)
 
       constraints.append({'type': 'ineq', 'fun': func})
+
+  def centerfunc(x):
+    sevals = np.concatenate([spl(xi) for spl, xi in zip(splfuncs, x)])
+    revals = np.concatenate([r(xi) for r, xi in zip(radfuncs, x)])
+    mean = np.mean(sevals, axis=0)
+    return np.linalg.norm(sevals - mean[_], axis=1) - rfac * revals
+
+  constraints.append({'type': 'ineq', 'fun': centerfunc})
 
   def costfunc(displacements: NDArray):
     return displacements.sum()

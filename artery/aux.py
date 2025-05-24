@@ -4,10 +4,11 @@ from pyhaemo.geo.notwist import compute_notwistframe
 from pyhaemo.spl import NDSpline
 from pyhaemo.log import logger as log
 
+from itertools import combinations
+
 from typing import Sequence
 
 from numpy.typing import NDArray
-
 
 
 def distance(arr0: np.ndarray, arr1: np.ndarray) -> np.ndarray:
@@ -258,3 +259,209 @@ def compute_frames(tangents: NDArray | Sequence[NDArray], normal) -> NDArray:
     frames.append(frame[-1] @ np.diag([1, -1, -1]))
 
   return np.stack(frames)
+
+
+def take_lower_triangular(arr: NDArray) -> NDArray:
+  indices = np.tril_indices_from(arr, k=-1)
+  return arr[indices]
+
+
+def biftruncate_(artery, ibif, rfac=2, npoints=201, nref=2):
+  """
+  Truncate the centerlines in a way that all the distances of the vessel
+  to one another are at least rfac times the radii.
+
+  Also ensure that the centerlines are at a distance rfac times the radius
+  from the bifurcation center.
+  """
+  bif = artery.bifurcations[ibif]
+  assert len(bif) > 1
+
+  centerlines = [artery.centerlines[abs(i) - 1] for i in bif]
+  radii = [artery.radii[abs(i) - 1] for i in bif]
+  evalpoints = [np.linspace(*cl.knots[0][[0, -1]], npoints+2)[1:-1]
+                            [slice(None) if i < 0 else slice(None, None, -1)]
+                            for i, cl in zip(bif, centerlines)]
+
+  # (npoints, ncenterlines, 3)
+  ceval = np.stack([cl(evalf) for cl, evalf in zip(centerlines, evalpoints)], axis=1)
+  r0s = np.array([r([r.knots[0][0 if i < 0 else -1]]).ravel()
+                  for i, r, evalf in zip(bif, radii, evalpoints)], dtype=float)
+  maxr = r0s.max()
+  mean = np.mean(ceval[0], axis=0)
+
+  i = 0
+  while i < npoints:
+
+    points = ceval[i]
+    d = ((points[:, _] - points[_])**2).sum(-1) ** .5
+
+    if not (take_lower_triangular(d) > 2 * maxr).all() or \
+       not (((points - mean)**2).sum(-1)**.5 > 2 * maxr).all():
+      i += 1
+      continue
+    else:
+      break
+
+  else:
+    raise ValueError("No points satisfy the distance condition")
+
+  truncation_points = [points[i] for points in evalpoints]
+
+  kwargs = {}
+  for i, mypoint, myspline in zip(bif, truncation_points, centerlines):
+    myknots = myspline.knotvector[0].refine(nref).knots[1: -1]
+    xi = myknots[np.abs( mypoint - myknots ).argmin()]
+    if i < 0:
+      kwargs[str(abs(i))] = (xi, None)
+    else:
+      kwargs[str(abs(i))] = (None, xi)
+
+  return artery.truncate_edges(**kwargs)
+
+
+def _biftruncate(artery, ibif, rfac=2, npoints=201, nref=2):
+  """
+  Truncate the centerlines in a way that all the distances of the vessel
+  to one another are at least rfac times the radii.
+
+  Also ensure that the centerlines are at a distance rfac times the radius
+  from the bifurcation center.
+  """
+  bif = artery.bifurcations[ibif]
+  assert len(bif) > 1
+
+  centerlines = [artery.centerlines[abs(i) - 1] for i in bif]
+  radii = [artery.radii[abs(i) - 1] for i in bif]
+  evalpoints = [np.linspace(*cl.knots[0][[0, -1]], npoints+2)[1:-1]
+                            [slice(None) if i < 0 else slice(None, None, -1)]
+                            for i, cl in zip(bif, centerlines)]
+
+  # (npoints, ncenterlines, 3)
+  ceval = np.stack([cl(evalf) for cl, evalf in zip(centerlines, evalpoints)], axis=1)
+
+  # (ncenterlines,)
+  r0s = np.array([r([r.knots[0][0 if i < 0 else -1]]).ravel()
+                  for i, r, evalf in zip(bif, radii, evalpoints)], dtype=float)
+  maxr = r0s.max()
+  mean = np.mean(ceval[0], axis=0)
+
+  i = 0
+  while i < npoints:
+
+    points = ceval[i]
+
+    # (ncenterlines, ncenterlines)
+    d = ((points[:, _] - points[_])**2).sum(-1) ** .5
+
+    mutual_distances = take_lower_triangular(d)
+    distance_center = ((points - mean)**2).sum(-1)**.5
+
+    if not (mutual_distances > rfac * maxr).all() or \
+       not (distance_center > rfac * maxr).all():
+      i += 1
+    else:
+      break
+
+  else:
+    raise ValueError("No points satisfy the distance condition")
+
+  truncation_points = [points[i] for points in evalpoints]
+
+  kwargs = {}
+  for i, mypoint, myspline in zip(bif, truncation_points, centerlines):
+    # myknots = myspline.knotvector[0].refine(nref).knots[1: -1]
+    # xi = myknots[np.abs( mypoint - myknots ).argmin()]
+    xi = mypoint
+    if i < 0:
+      kwargs[str(abs(i))] = (xi, None)
+    else:
+      kwargs[str(abs(i))] = (None, xi)
+
+  return artery.truncate_edges(**kwargs)
+
+
+def find_distance(artery, subset, centroid, rfac=2, npoints=201):
+  """
+  Given a subset of length 2 of a bifurcation.
+
+  It finds the points of the centerlines that have a certain distance.
+  """
+  assert len(subset) == 2
+
+  clines = [artery.centerlines[abs(val) - 1] for val in subset]
+  radii = [artery.radii[abs(val) - 1] for val in subset]
+
+  evalpoints = [np.linspace(*cl.knots[0][[0, -1]], npoints+2)[1:-1]
+                            [slice(None) if i < 0 else slice(None, None, -1)]
+                            for i, cl in zip(subset, clines)]
+
+  # (npoints, 2, 3)
+  ceval = np.stack([cline(evalf) for cline, evalf in zip(clines, evalpoints)], axis=1)
+  reval = np.stack([r(evalf) for r, evalf in zip(radii, evalpoints)], axis=1)
+
+  i, j = 0, 0
+  while i < npoints and j < npoints:
+    p0, p1 = ceval[i][0], ceval[j][1]
+    maxr = max(reval[i][0], reval[j][1])
+
+    dist = np.linalg.norm(p0 - p1)
+    if dist < rfac * maxr:
+      i += 1
+      j += 1
+      continue
+
+    distance_center = ((np.stack([p0, p1], axis=0) - centroid)**2).sum(-1)**.5
+
+    if (distance_center > rfac * maxr).all():
+      break
+
+    if distance_center[0] < rfac * maxr:
+      i = i + 1
+
+    if distance_center[1] < rfac * maxr:
+      j = j + 1
+
+  else:
+    raise ValueError("No points satisfy the distance condition")
+
+  return {subset[0]: evalpoints[0][i],
+          subset[1]: evalpoints[1][j]}
+
+
+def biftruncate(artery, rfac=2, npoints=201):
+
+  endpoints = artery.endpoints()
+  kwargs = dict(zip(range(1, artery.nedges + 1), ([None, None] for _ in range(artery.nedges))))
+
+  for bif in artery.nontrivial_bifs:
+
+    centroid = np.mean( [endpoints[i] for i in bif], axis=0 )
+
+    param_list = []
+    for myset in combinations(bif, 2):
+      param = find_distance(artery, myset, centroid, rfac=rfac, npoints=npoints)
+      param_list.append(param)
+
+    for key in bif:
+      values = [d[key] for d in param_list if key in d]
+      if key > 0:
+        kwargs[abs(key)][1] = min(values)
+      else:
+        kwargs[abs(key)][0] = max(values)
+
+  _kwargs = {str(key): val for key, val in kwargs.items()}
+  kwargs = {}
+  for k, v in _kwargs.items():
+    if any(_v is None for _v in v) or v[0] < v[1]:
+      kwargs[k] = v
+    else:
+      mean = np.mean(v)
+      kwargs[k] = (mean - 0.1, mean + 0.1)
+
+  try:
+    return artery.truncate_edges(**kwargs)
+  except Exception:
+    import ipdb
+    ipdb.set_trace()
+    return artery.truncate_edges(**kwargs)

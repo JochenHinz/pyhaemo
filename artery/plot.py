@@ -110,6 +110,7 @@ def plot_artery(artery, npoints=1001, plotter=None, show=True):
   plotter.add_legend()
   if show:
     plotter.show()
+    plotter.close()
 
   return plotter
 
@@ -169,6 +170,7 @@ def plot_frames(artery):
 
   plotter.add_mesh(pyvista_mesh(final_mesh), color='tan', line_width=1, show_edges=True)
   plotter.show()
+  plotter.close()
 
 
 def plot_bifurcation(artery):
@@ -250,5 +252,6 @@ def plot_mesh(artery, npoints=5, dx=0.05, plotter=None, show=True, color='tan'):
 
   if show:
     plotter.show()
+    plotter.close()
 
   return plotter
