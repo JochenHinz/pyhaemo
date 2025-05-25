@@ -40,6 +40,8 @@ def linear_interpolation(spl0: NDSplineArray,
     kvz = UnivariateKnotVector(np.linspace(0, 1, 2), degree=kvz)
 
   assert kvz.degree >= 1
+  assert kvz.knots[0] == 0 and kvz.knots[-1] == 1, \
+      "The knot vector must start at 0 and end at 1 for linear interpolation."
   assert spl0.shape == spl1.shape
   assert (spl0.contract_all().knotvector == spl1.contract_all().knotvector).all()
 
@@ -89,6 +91,8 @@ def cubic_hermite_interpolation(spl0: NDSplineArray,
     kvz = UnivariateKnotVector(np.linspace(0, 1, 2), degree=kvz)
 
   assert kvz.degree >= 3
+  assert kvz.knots[0] == 0 and kvz.knots[-1] == 1, \
+      "The knot vector must start at 0 and end at 1 for linear interpolation."
   assert spl0.shape == spl1.shape
   assert (spl0.contract_all().knotvector == spl1.contract_all().knotvector).all()
 
