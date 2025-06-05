@@ -1,10 +1,14 @@
-from pyhaemo.util import np
+from pyhaemo.util import np, normalize, _
+from pyhaemo.log import logger as log
 
 from edge import VascularEdge
+from notwist import compute_notwistframe
 
+from itertools import combinations, repeat
 from functools import lru_cache
 
 from numpy.typing import NDArray
+from numba import njit
 
 from scipy.spatial import cKDTree
 
@@ -106,3 +110,152 @@ def merge_furcs_proximity(graph, eps=1e-5):
 
   ret = graph.merge_furcs(minpair[0], minpair[1])
   return merge_furcs_proximity(ret, eps=eps)
+
+
+@njit(cache=True)
+def find_distance(points0, points1, r0, r1, centroid, rfac=2):
+  n0, n1 = len(points0), len(points1)
+
+  i, j, success = 0, 0, True
+
+  while i < n0 and j < n1:
+    p0, p1 = points0[i], points1[j]
+    maxr = max(r0[i], r1[j])
+
+    dist = np.linalg.norm(p0 - p1)
+    if dist < rfac * maxr:
+      i += 1
+      j += 1
+      continue
+
+    distance_center = ((np.stack((p0, p1), axis=0) - centroid)**2).sum(-1)**.5
+
+    if (distance_center > rfac * maxr).all():
+      break
+
+    if distance_center[0] < rfac * maxr:
+      i = i + 1
+
+    if distance_center[1] < rfac * maxr:
+      j = j + 1
+
+  else:
+    i, j, success = 0, 0, False
+
+  return i, j, success
+
+
+def rtruncate(graph, rfac=2):
+  """
+  Docstring forthcoming.
+  """
+  truncate_dict = {}
+
+  for furc in graph.nontrivial_furcations:
+    centroid = furc.centroid
+
+    myparams = {}
+    for pair in combinations(furc.indices, 2):
+      myfac = rfac
+      success = False
+      while not success:
+        if myfac < rfac / 10:
+          raise ValueError(f"Could not find indices for furcation {furc} with centroid {centroid}.")
+        e0, e1 = graph.get_edges([-i for i in pair])
+        *indices, success = find_distance(e0.cpoints, e1.cpoints,
+                                          e0.radii, e1.radii,
+                                          centroid,
+                                          myfac)
+        if success is False:
+          log.warning(f"No indices found for edge pair {pair} and centroid {centroid}")
+          myfac /= 2
+          log.warning(f"Trying again with rfac = {myfac}")
+        else:
+          for i, lindex in zip(pair, indices):
+            myparams.setdefault(i, []).append(lindex if i < 0 else -lindex - 1)
+          break
+
+    for i, params in myparams.items():
+      truncate_dict.setdefault(abs(i), [None, None])[0 if i < 0 else 1] = max(params)
+
+  for key, vals in truncate_dict.items():
+    if any(val is None for val in vals):
+      continue
+    edge, = graph.get_edges(key)
+    _vals = [ val % edge.npoints for val in vals ]
+    if _vals[0] >= _vals[1]:
+      npoints_2 = edge.npoints // 2
+      log.warning(f'Found invalid truncation indices {vals} for edge with index {key}.')
+      truncate_dict[key] = [npoints_2 - 1, npoints_2 + 1]
+
+  return truncate_dict
+
+
+def align_nontrivial_normals(graph):
+  """
+  Align normals of nontrivial furcations to the furcation centroid.
+  """
+  nontriv_indices = [i for i, furc in enumerate(graph.furcations) if len(furc) > 2]
+  nfurcs = set(graph.furcations[i] for i in nontriv_indices)
+  if not nfurcs:
+    return graph
+
+  signs = dict(zip(nfurcs, repeat(1)))  # map each furcation to a sign +1 or -1
+  queue = []
+
+  # while there are still orientable furcations
+  while nfurcs:
+
+    if not queue:
+      queue = [nfurcs.pop()]
+
+    furc, *queue = queue  # take first from the queue
+
+    nfurcs.discard(furc)
+
+    normal = signs[furc] * furc.normal
+    for i in furc.indices:
+      otherfurc = graph.get_furc(-i)
+      if otherfurc not in nfurcs or len(otherfurc) <= 2:  # skip already oriented or trivial furcations
+        continue
+
+      # get the oriented other normal
+      othernormal = otherfurc.normal * signs[otherfurc]
+      edge, = graph.get_edges(-i)  # directed away from furc
+
+      nfinal = edge.frame.project_and_transport(normal)
+      if nfinal @ (edge.frame[-1:].project_tangent_plane(othernormal)).ravel() < 0:
+        signs[otherfurc] *= -1
+      queue.append(otherfurc)
+
+  furcations = list(graph.furcations)
+  for i in nontriv_indices:
+    furc = graph.furcations[i]
+    if signs[furc] == -1:
+      log.warning(f"Reversing the orientation of the {i}-th furcation with indices{furc.indices.indices}")
+      furcations[i] = -furc
+
+  return graph._edit(furcations=furcations)
+
+
+def align_frames(graph):
+  """
+  Align the edges' frames with the bifurcations' normals.
+  """
+  normal_dict = {}
+
+  for furc in graph.furcations:
+    mynormal = furc.normal
+    for i in furc.indices:
+      e, = graph.get_edges(i)
+      normal_dict[i] = normalize( e.frame[-1:]
+                                   .project_tangent_plane(mynormal).ravel() )
+  edges = []
+  for i, e in zip(graph.indices, graph.edges):
+    frame = e.frame
+    tangents = frame.frame[..., 2]
+    newframe = compute_notwistframe(tangents, n0=normal_dict[-i],
+                                              nfinal=normal_dict[i])
+    edges.append( e._edit(frame=frame._edit(frame=newframe)) )
+
+  return graph._edit(edges=edges)

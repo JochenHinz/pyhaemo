@@ -6,6 +6,8 @@ from pyhaemo.geo.bif import repeated_knot_disc, hermite_pols_interval, \
                             quarter_disc, join_quarters, hermite_nonconstant_tangent
 from pyhaemo.geo.interp import cubic_hermite_interpolation
 
+from notwist import rotate_vector
+
 from typing import Sequence
 
 
@@ -15,7 +17,8 @@ def bif_from_matrices(matrices: Sequence[np.ndarray],
                       xC: np.ndarray,
                       bB: Numeric,
                       bT: Numeric,
-                      unitdisc: NDSplineArray | Int = 4) -> NDSplineArray:
+                      unitdisc: NDSplineArray | Int = 4,
+                      exploit_symmetry: bool = False) -> NDSplineArray:
   """
   local x direction -->
 
@@ -53,6 +56,11 @@ def bif_from_matrices(matrices: Sequence[np.ndarray],
   unitdisc: :class:`NDSplineArray` or :class:`Int`
     The unit disc that is used to create the roof of the bifurcation.
     If :class:`Int`, a new unit disc is created with the given number of elements.
+  exploit_symmetry: :class:`bool`
+    If `True`, the symmetry of the bifurcation is exploited meaning that
+    the cross that represents the frame at the inlet to the bifurcation is
+    re-labeled such that its normal is chosen to align most closely with the
+    bifurcation's normal
 
   There are not `cevalpoints` in this function, as the input curves are not
   defined by a set of evaluation points, but by the matrices.
@@ -65,12 +73,17 @@ def bif_from_matrices(matrices: Sequence[np.ndarray],
 
   unitdisc = unitdisc.to_ndim(1)
 
-  evalL = [.5], [1]
-  evalR = [1], [.5]
+  evalL = [.5], [1]  # we evaluate the third patch (D) in this point
+  evalR = [1], [.5]  # we evaluate the first patch (B) in this point
 
-  xL = unitdisc[3](*evalL).ravel()
-  xR = unitdisc[1](*evalR).ravel()
   ax = normalize(np.asarray(ax))
+
+  if exploit_symmetry:
+    for i, matrix in enumerate(matrices):
+      mynormal = matrix[:, 0]
+      mytangent = matrix[:, 2]
+      rotations = [ rotate_vector(mynormal, mytangent, theta) for 
+                    theta in np.linspace(0, 2 * np.pi, 4, endpoint=False) ]
 
   discs = list(map(lambda x, c: c + (x * unitdisc[:, _]).sum(-1),
                    matrices, centerpoints))
@@ -85,13 +98,13 @@ def bif_from_matrices(matrices: Sequence[np.ndarray],
                                               np.roll(discs, -1)):
 
     t0, t1 = map(normalize, (mat0[:, 2], mat1[:, 2]))
-    p0 = disc0[3](*evalL).ravel()
-    p1 = disc1[1](*evalR).ravel()
+    p0 = disc0[3](*evalL)
+    p1 = disc1[1](*evalR)
 
     dist = np.linalg.norm(center1 - center0)
 
-    spls.append( cubic_hermite_interpolation(NDSpline([], p0[_]),
-                                             NDSpline([], p1[_]),
+    spls.append( cubic_hermite_interpolation(NDSpline([], p0),
+                                             NDSpline([], p1),
                                              dist * t0,
                                              -dist * t1) )
 
@@ -112,15 +125,15 @@ def bif_from_matrices(matrices: Sequence[np.ndarray],
     aL = np.linalg.norm(xC - xL)
 
     # Right arm rotation matrix (normalized in x and y, not necessarily in z)
-    RR = np.stack([(xR - xC) / aR, ax, tR], axis=1)
+    RR = np.stack([ax, (xC - xR) / aR, tR], axis=1)
 
     # Left arm rotation matrix
-    RL = np.stack([(xC - xL) / aL, ax, tL], axis=1)
+    RL = np.stack([ax, (xL - xC) / aL, tL], axis=1)
 
     t0f = lambda geom: splL([0], dx=1).ravel() / 2
 
     def t1f(geom):
-      x, y = geom
+      x, y, z = geom
 
       # we split the disc into two parts, separated by x = 0.
       H00, H10, *ignore = hermite_pols_interval(-1, 0)
@@ -135,16 +148,16 @@ def bif_from_matrices(matrices: Sequence[np.ndarray],
       # does not change at x = -1, x = 0 and x = 1 in the direction of x.
       return tR * H00(y) + tcomb * (H10(y) + H01(y)) + tL * H11(y)
 
-    A = quarter_disc(unitdisc)[0] * np.array([aL, bT, 0])
-    B = quarter_disc(unitdisc)[1] * np.array([aL, bB, 0])
-    C = quarter_disc(unitdisc)[2] * np.array([aR, bB, 0])
-    D = quarter_disc(unitdisc)[3] * np.array([aR, bT, 0])
+    A = quarter_disc(unitdisc)[0] * np.array([bB, aL, 0])
+    B = quarter_disc(unitdisc)[1] * np.array([bB, aR, 0])
+    C = quarter_disc(unitdisc)[2] * np.array([bT, aR, 0])
+    D = quarter_disc(unitdisc)[3] * np.array([bT, aL, 0])
 
     # rotate and translate
     A = (RL * A[..., _, :]).sum(-1) + xC
-    B = (RL * B[..., _, :]).sum(-1) + xC
+    B = (RR * B[..., _, :]).sum(-1) + xC
     C = (RR * C[..., _, :]).sum(-1) + xC
-    D = (RR * D[..., _, :]).sum(-1) + xC
+    D = (RL * D[..., _, :]).sum(-1) + xC
 
     roof = join_quarters(A, B, C, D)
 

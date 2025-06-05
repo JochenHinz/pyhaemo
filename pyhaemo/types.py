@@ -521,15 +521,15 @@ class LockableDict(Mapping):
       return getattr(self._wrapped_dict, method)(*args, **kwargs)
     return wrapper
 
+  __getitem__ = _delegate_to_wrapped_dict('__getitem__')
+  __iter__ = _delegate_to_wrapped_dict('__iter__')
+  __len__ = _delegate_to_wrapped_dict('__len__')
+
   def lock(self):
     """
     Lock the dictionary after initialization.
     """
     self._locked = True
-
-  __getitem__ = _delegate_to_wrapped_dict('__getitem__')
-  __iter__ = _delegate_to_wrapped_dict('__iter__')
-  __len__ = _delegate_to_wrapped_dict('__len__')
 
   def __setitem__(self, name, value):
     if self._locked:
