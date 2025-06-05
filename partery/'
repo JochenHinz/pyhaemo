@@ -1,0 +1,341 @@
+from pyhaemo.util import np, _, normalize
+from pyhaemo.types import Float, Int, lock, Numeric
+from pyhaemo.log import logger as log
+
+from edge import IntegerTuple, VascularEdge
+from network import EdgeGraph, NFurcation
+
+from typing import Self, Sequence, Callable, Dict
+from functools import cached_property, wraps
+import os
+
+from numpy.typing import ArrayLike
+
+
+SL = slice(None)
+RSL = slice(None, None, -1)
+
+
+def no_empty_edges(func: Callable) -> Callable:
+
+  @wraps(func)
+  def wrapper(self, *args, **kwargs):
+    if self.has_empty_edges():
+      raise ValueError("Cannot perform operation on a vascular graph with empty edges.")
+    return func(self, *args, **kwargs)
+
+  return wrapper
+
+
+class VascularGraph(EdgeGraph):
+
+  @classmethod
+  def from_edges(cls, data: Sequence[ArrayLike | VascularEdge]) -> Self:
+    edges = tuple( VascularEdge(pointset) for pointset in data )
+
+    tangents = np.concatenate([
+               [normalize(e.cpoints[1] - e.cpoints[0]) for e in edges],
+               [normalize(e.cpoints[-1] - e.cpoints[-2]) for e in edges]
+              ])
+    normals = tangents[:, [2, 1, 0]] * np.array([[-1, 0, 1]])
+
+    indices = list(range(1, len(edges) + 1))
+
+    furcations = tuple( (i,) for i in indices ) + \
+                 tuple( (-i,) for i in indices )
+    centroids = tuple( edge.points[-1][:3] for edge in edges ) + \
+                tuple( edge.points[0][:3] for edge in edges )
+
+    return cls(indices, edges, list(map(NFurcation, furcations, centroids, normals)))
+
+  @classmethod
+  def from_centerlines_radii(cls, centerlines: Sequence[ArrayLike], radii: Sequence[ArrayLike]):
+    return cls.from_edges([ np.concatenate([cline, rad[:, _]], axis=1)
+                            for cline, rad in zip(centerlines, radii, strict=True) ])
+
+  @classmethod
+  def from_csv(cls, foldername: str):
+    """
+    Create a vascular graph from CSV files in the specified folder.
+    """
+
+    filenames = (os.path.join(foldername, f)
+                 for f in os.listdir(foldername) if f.endswith('.csv'))
+
+    edges = []
+    for data in map(lambda fn: np.genfromtxt(fn, delimiter=',', skip_header=1), filenames):
+      edges.append(data)
+
+    assert edges
+
+    return cls.from_edges(edges)
+
+  @classmethod
+  def from_swc(cls, *args, **kwargs):
+    """
+    Create a vascular graph from SWC files.
+    This method is a placeholder and should be implemented.
+    """
+    raise NotImplementedError("SWC file parsing is not implemented yet.")
+
+  def __init__(self, indices: Sequence[Int],
+                     edges: Sequence[VascularEdge],
+                     furcations: Sequence[Sequence[Int] | IntegerTuple]):
+
+    super().__init__(indices, list(map(VascularEdge, edges)), furcations)
+
+  def has_empty_edges(self):
+    return any(edge.is_empty() for edge in self.edges)
+
+  # TODO: Find a better solution for the following three properties
+  @cached_property
+  @lock
+  @no_empty_edges
+  def endpoints(self):
+    ret = { i: edge.points[-1][:3] for i, edge in zip(self.indices, self.edges) }
+    ret.update( {-i: edge.points[0][:3] for i, edge in zip(self.indices, self.edges) } )
+    return ret
+
+  @cached_property
+  @lock
+  @no_empty_edges
+  def endopint_tangents(self):
+    ret = {i: (e.points[-1, :3] - e.points[-2, :3]) / (e.verts[-1] - e.verts[-2])
+               for i, e in zip(self.indices, self.edges)}
+    ret.update( {-i: (e.points[1, :3] - e.points[0, :3]) / (e.verts[1] - e.verts[0])
+                    for i, e in zip(self.indices, self.edges) } )
+    return ret
+
+  @cached_property
+  @lock
+  @no_empty_edges
+  def endpoint_radii(self):
+    ret = { i: e.points[-1, -1] for i, e in zip(self.indices, self.edges) }
+    ret.update( {-i: e.points[0, -1] for i, e in zip(self.indices, self.edges) } )
+    return ret
+
+  def normalize(self):
+    lengths = [ edge.length for edge in self.edges ]
+    mean = np.mean(lengths)
+    edges = [ edge._edit(points=edge.points / mean) for edge in self.edges ]
+    furcs = [ f._edit(centroid=f.centroid / mean) for f in self.furcations ]
+
+    return self._edit(edges=edges, furcations=furcs)
+
+  def delete_twofurcations(self) -> Self:
+    """
+    Remove all furcations that have exactly two edges by merging the edges
+    into a single edge.
+    """
+    for i, furc in enumerate(self.furcations):
+      if len(furc) == 2:
+
+        i0, i1 = furc.indices
+
+        log.warning(f"Deleting twofurcation {i} with indices {i0}, {i1}.")
+
+        absindices = set(map(abs, (i0, i1)))
+
+        edges = self.get_edges((i0, i1))
+        new_edge = edges[0] | (-edges[1])
+
+        indices = [i for i in self.indices if i not in absindices] + [abs(i0)]
+        edges = self.get_edges(indices[:-1]) + (new_edge if i0 > 0 else -new_edge,)
+
+        mapp = {i: i for i in self.indices if i not in absindices}
+        mapp[i0] = i0
+        mapp[i1] = -i0
+
+        furcs = [furc.renumber(mapp) for furc in self.furcations[:i] +
+                                                 self.furcations[i+1:]]
+        return self._edit(indices=indices,
+                          edges=edges,
+                          furcations=furcs).delete_twofurcations()
+    else:
+      return self
+
+  def set_normals(self):
+    """
+    Set the normals of all non-trivial furcations based on their endpoints.
+    """
+    endpoints = self.endpoints
+    itriv = set(i for i, furc in enumerate(self.furcations) if len(furc) <= 2)
+    furcs = list(self.furcations)
+
+    for i, furc in enumerate(furcs):
+      if i in itriv: continue
+      furcs[i] = furc.set_normal(endpoints)
+
+    return self._edit(furcations=furcs)
+
+  def orient_nontrivial(self, rfac=1) -> Self:
+    """
+    Orient non-trivial furcations based on their endpoints.
+    If `rfac` is provided, it will also truncate the edges based on the radius
+    factor and the orientation will be applied to the truncated furcations.
+    """
+    _self = self.rtruncate(rfac).set_normals()
+    endpoints = _self.endpoints
+    return self._edit(furcations=[furc.orient(endpoints) for furc in _self.furcations])
+
+  def orient_trivial(self) -> Self:
+    """
+    Orient all trivial furcations by transporting the normal of adjacent
+    nontrivial furcations along the frame to the trivial furcations if possible.
+    """
+    itriv = [i for i, furc in enumerate(self.furcations) if len(furc) <= 2]
+    if not itriv:
+      return self
+    furcs = list(self.furcations)
+
+    for i, myfurc in zip(itriv, map(furcs.__getitem__, itriv)):
+      iedge, = myfurc.indices
+      otherfurc = self.get_furc(-iedge)
+      if len(otherfurc) <= 2:
+        continue
+      myframe = self.get_edges([iedge])[0].frame  # oriented away from otherfurc
+      n0 = normalize(myframe[:2].project_tangent_plane(otherfurc.normal)[0].ravel())
+      furcs[i] = furcs[i]._edit(normal=myframe.transport(n0))
+
+    return self._edit(furcations=furcs)
+
+  def align_nontrivial_normals(self) -> Self:
+    from preprocessing import align_nontrivial_normals
+    return align_nontrivial_normals(self)
+
+  def align_frames(self) -> Self:
+    from preprocessing import align_frames
+    return align_frames(self)
+
+  def delete_small_edges(self, eps: Float):
+    assert eps > 0
+    delindices = [i for i, e in enumerate(self.edges, 1) if e.length < eps]
+    return self.delete_edges(delindices)
+
+  def merge_furcs_proximity(self, *args, **kwargs):
+    from preprocessing import merge_furcs_proximity
+    return merge_furcs_proximity(self, *args, **kwargs)
+
+  def recompute_centroids(self, eps=1e-6) -> Self:
+    endpoints = self.endpoints
+
+    centroids = []
+    for furc in self.furcations:
+      mypoints = np.stack(list(map(endpoints.__getitem__, furc)), axis=0)
+
+      distances = ((mypoints[:, _] - mypoints[_])**2).sum(-1)**.5
+      distances[np.triu_indices_from(distances)] = np.inf  # ignore self-distances
+      distances[distances < eps] = 0
+
+      zerox, zeroy = np.where(distances == 0)
+      if zerox.size:
+        mypoints = [mypoints[zerox[0]]]
+
+      centroids.append( np.mean(mypoints, axis=0) )
+
+    furcs = [furc._edit(centroid=centroid)
+             for furc, centroid in zip(self.furcations, centroids)]
+
+    return self._edit(furcations=furcs)
+
+  def truncate_furcdist(self, dist: Numeric) -> Self:
+    truncate_dict = {}
+
+    for furc in self.nontrivial_furcations:
+      mycenter = furc.centroid
+
+      for i, edge in zip(furc, self.get_edges(list(map(abs, furc.indices)))):
+        distances = np.linalg.norm(edge.points[:, :3] - mycenter, axis=1)
+        candidates, = np.where(distances > dist)
+        if not candidates.size:
+          raise ValueError(f"No points found within distance "
+                           f"{dist} from furcation {list(furc.indices)}.")
+        myindex = candidates[ np.argmin(distances[candidates]) ]
+        if i < 0: truncate_dict.setdefault(abs(i), [None, None])[0] = myindex
+        else: truncate_dict.setdefault(abs(i), [None, None])[1] = myindex
+
+    return self.truncate_edges(truncate_dict)
+
+  def plot(self, *args, **kwargs):
+    from plot import plot_vgraph
+    return plot_vgraph(self, *args, **kwargs)
+
+  def refit(self, xi: Int | ArrayLike = 1001) -> Self:
+    return self._edit(edges=[edge.refit(xi) for edge in self.edges])
+
+  def furcomplete(self, npoints=1001, eps=1e-8):
+    endpoints = self.endpoints
+    radii = self.endpoint_radii
+    edgedict = dict(zip(self.indices, self.edges))
+
+    for furc in self.furcations:
+      center = furc.centroid
+
+      for i in furc:
+        mypoint = endpoints[i]
+        if np.linalg.norm(mypoint - center) < eps:
+          continue
+
+        edge = edgedict[abs(i)]
+        rad = radii[i]
+
+        # reverse the order if i > 0 to append at the end
+        points = ([[*center, rad]], edge.points)[SL if i < 0 else RSL]
+        edge = edge.__class__(points=np.concatenate(points, axis=0))
+        edgedict[abs(i)] = edge
+
+    xi = np.linspace(0, 1, npoints)
+    for i, edge in edgedict.items():
+      edgedict[i] = edgedict[i].refit(xi)
+
+    return self._edit(edges=[edgedict[i] for i in self.indices])
+
+  def split_edges_proximity(self, *args, **kwargs):
+    from preprocessing import split_edges_proximity
+    return split_edges_proximity(self, *args, **kwargs)
+
+  def _rtruncate(self, rfac: Float = 2) -> Dict[Int, ArrayLike]:
+    assert rfac > 0, "Radius factor must be positive."
+    from preprocessing import rtruncate
+    return rtruncate(self, rfac)
+
+  def rtruncate(self, rfac=2) -> Self:
+    """
+    Truncate edges based on a radius factor.
+    """
+    if rfac == 0: return self
+    return self.truncate_edges(self._rtruncate(rfac))
+
+  def to_spline_graph(self, npoints, **fitkwargs):
+    """
+    Convert the vascular graph to a spline graph.
+    """
+    from sgraph import SplineGraph
+    return SplineGraph(self.indices,
+                       [edge.to_spline_edge(npoints, **fitkwargs) for edge in self.edges],
+                       self.furcations)
+
+
+if __name__ == '__main__':
+  artery = VascularGraph.from_csv('data/csv/coro') \
+                        .normalize() \
+                        .refit()
+
+  artery = artery.split_edges_proximity(eps=0.06)
+  # .merge_furcs_proximity(0.07) \
+  # .refit() \
+  # .recompute_centroids() \
+
+  # artery = artery.orient_nontrivial()
+  # .align_nontrivial_normals() \
+  # .orient_trivial() \
+  # .rtruncate(1) \
+  # .furcomplete(npoints=1001) \
+  # .delete_twofurcations() \
+  # .align_frames()
+
+  artery.plot()
+
+  sgraph = artery.to_spline_graph(21)
+
+  sgraph.make_mesh(rfac=2)

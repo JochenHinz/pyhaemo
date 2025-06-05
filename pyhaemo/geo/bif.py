@@ -31,7 +31,7 @@ def quarter_disc(spl: NDSplineArray) -> Tuple[NDSplineArray, ...]:
     |  3 - - 5  |
     |A |  C  | E|
     |  |     |  |
-    |  2-----4  |
+    |  2 - - 4  |
     | /   B   \ |
     0 - - - - - 6
 

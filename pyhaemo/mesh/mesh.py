@@ -124,7 +124,7 @@ class Mesh(Immutable, metaclass=MeshMeta):
     Compute the mesh's submesh elements without duplicates.
     Requres `self._submesh_indices` to be implemented by the class.
     """
-    # XXX: jit-compile the element map
+    # TODO: jit-compile the element map
 
     elements = np.concatenate([ mesh.elements[:, list(slce)]
                                           for slce in mesh._submesh_indices ])

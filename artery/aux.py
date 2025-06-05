@@ -423,7 +423,9 @@ def find_distance(artery, subset, centroid, rfac=2, npoints=201):
       j = j + 1
 
   else:
-    raise ValueError("No points satisfy the distance condition")
+    log.warning(f"No points satisfy the distance condition for pair {subset}")
+    i = 0
+    j = 0
 
   return {subset[0]: evalpoints[0][i],
           subset[1]: evalpoints[1][j]}

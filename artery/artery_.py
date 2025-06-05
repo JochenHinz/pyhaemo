@@ -1,7 +1,7 @@
-from pyhaemo.util import np, clparam, frozen
+from pyhaemo.util import np, clparam, frozen, normalize, _
 from pyhaemo.types import Immutable, Int
 from pyhaemo.spl import NDSpline, UnivariateKnotVector
-from pyhaemo.geo.interp import linear_interpolation
+from pyhaemo.geo.interp import linear_interpolation, cubic_hermite_interpolation
 from pyhaemo.log import logger as log
 
 from datahandler import csv_converter, swc_converter
@@ -11,7 +11,7 @@ from plot import plot_frames
 
 from itertools import chain, count, combinations
 from functools import cached_property
-from typing import Tuple, Sequence
+from typing import Tuple, Sequence, Optional
 import os
 
 from scipy.spatial import cKDTree
@@ -152,7 +152,7 @@ class Artery(Immutable):
     return self._edit(centerlines=[cline / mean for cline in self.centerlines],
                       radii=[r / mean for r in self.radii])
 
-  def bifcomplete(self, eps=1e-9):
+  def bifcomplete(self, eps=1e-9, npoints=1001):
     """
     Complete the centerline splines leading up to the bifurcations using
     a Hermite spline.
@@ -161,17 +161,48 @@ class Artery(Immutable):
     """
     endpoints = self.endpoints()
     endpoint_tangents = self.endpoints(dx=1)
+    endpoint_radii = self.r_endpoints()
     lengths = list(map(centerline_length, self.centerlines))
 
-    rl_ext = [ [None, None] for i in range(self.nedges) ]
+    centerline_ext = [ [None, None] for i in range(self.nedges) ]
+    r_ext = [ [None, None] for i in range(self.nedges) ]
 
     for bif, centerpoint in zip(self.bifurcations, self.centerpoints):
       for i in bif:
         if np.linalg.norm(endpoints[i] - centerpoint) < eps:
           continue
-        cline = self.centerlines[abs(i) - 1]
-        rad = self.radii[abs(i) - 1]
-        mylength = lengths[abs(i) - 1]
+
+        if i < 0:
+          # negative index means the centerline is oriented away from the centerpoint
+          x1 = endpoints[i]
+          t0 = x1 - centerpoint
+          t1 = normalize(endpoint_tangents[i]) * np.linalg.norm(t0)
+
+          centerline_ext[abs(i) - 1][0] = \
+            cubic_hermite_interpolation(NDSpline([], centerpoint[_]),
+                                        NDSpline([], x1[_]),
+                                        t0,
+                                        t1,
+                                        kvz=3)
+
+          r = endpoint_radii[i]
+          r_ext[abs(i) - 1][0] = linear_interpolation(NDSpline([], r[_]),
+                                                      NDSpline([], r[_]))
+        else:
+          x0 = endpoints[i]
+          t1 = centerpoint - x0
+          t0 = normalize(endpoint_tangents[i]) * np.linalg.norm(t1)
+
+          centerline_ext[abs(i) - 1][1] = \
+            cubic_hermite_interpolation(NDSpline([], x0[_]),
+                                        NDSpline([], centerpoint[_]),
+                                        t0,
+                                        t1,
+                                        kvz=3)
+
+          r = endpoint_radii[i]
+          r_ext[abs(i) - 1][0] = linear_interpolation(NDSpline([], r[_]),
+                                                      NDSpline([], r[_]))
 
   @property
   def nedges(self):
@@ -184,11 +215,11 @@ class Artery(Immutable):
       ret[-i] = cline(cline.knots[0][:1], dx=dx).ravel()
     return ret
 
-  def r_endpoints(self):
+  def r_endpoints(self, dx=0):
     ret = {}
     for i, r in enumerate(self.radii, 1):
-      ret[i] = r(r.knots[0][-1:]).ravel()
-      ret[-i] = r(r.knots[0][:1]).ravel()
+      ret[i] = r(r.knots[0][-1:], dx=dx).ravel()
+      ret[-i] = r(r.knots[0][:1], dx=dx).ravel()
     return ret
 
   def get_bif(self, index: Int, return_index=False):

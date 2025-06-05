@@ -1,6 +1,7 @@
 from pyhaemo.util import np
 from artery import Artery
 from aux import centerline_length, biftruncate
+from plot import plot_frames
 from preprocessing import split_edges_proximity, bifmerge
 
 
@@ -15,15 +16,15 @@ def plot_swc_data():
 
 
 def plot_csv_data():
-  artery = Artery.from_csv("data/csv/brain") \
+  artery = Artery.from_csv("data/csv/coro") \
                  .chordlength_parameterize() \
                  .normalize()
 
-  artery = split_edges_proximity(artery, eps=0.03)
+  artery = split_edges_proximity(artery, eps=0.06)
 
   artery.plot_pyvista()
 
-  artery = bifmerge(artery, eps=0.06).reparameterize()
+  artery = bifmerge(artery, eps=0.12).reparameterize()
 
   endpoints = artery.endpoints()
   centroids = {frozenset(bif): np.mean([endpoints[i] for i in bif], axis=0) for bif in artery.bifurcations}
@@ -39,7 +40,7 @@ def plot_csv_data():
   artery = artery.orient()
   centroids = [ centroids[frozenset(bif)] for bif in artery.bifurcations ]
   # artery.plot_pyvista()
-  # plot_frames(artery)
+  plot_frames(artery)
 
   vessels, bifs = make_mesh(artery, centroids=centroids)
   lengths = [centerline_length(cline) for cline in artery.centerlines]

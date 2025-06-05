@@ -1,5 +1,6 @@
 from pyhaemo.types import Int, Float
 from pyhaemo.geo import ellipse
+from pyhaemo.geo.bif import repeated_knot_disc
 
 from typing import Sequence
 
@@ -39,5 +40,5 @@ class SplineGraph(EdgeGraph):
 
   def make_mesh(self, dx: Float = 0.005, nref=3, rfac=2, **kwargs):
     from mesh import make_spline_mesh
-    cross = ellipse(1, 1, 4)
+    cross = repeated_knot_disc(4)
     return make_spline_mesh(self, cross, dx=dx, nref=nref, rfac=rfac, **kwargs)

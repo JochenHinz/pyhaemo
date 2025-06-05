@@ -1,13 +1,19 @@
 from pyhaemo.util import np, _
 
+from itertools import product
+
 import pyvista as pv
 
 
-def plot_vgraph(graph, plotter=None, show=True, show_normals=True):
+def plot_vgraph(graph, plotter=None,
+                       show=True,
+                       show_normals=True,
+                       show_frames=True,
+                       dx=0.1):
   if plotter is None:
     plotter = pv.Plotter()
 
-  for i, cline in enumerate(graph.edges, 1):
+  for i, cline in zip(graph.indices, graph.edges):
     pc = pv.PolyData()
     npoints = cline.points.shape[0]
     pc.points = cline.points[:, :3]
@@ -20,6 +26,18 @@ def plot_vgraph(graph, plotter=None, show=True, show_normals=True):
 
     plotter.add_points(centerpoint[_], color='red')
     plotter.add_point_labels(centerpoint[_], [str(i)])
+
+  if show_frames:
+    for edge in graph.edges:
+      cpoints = edge.cpoints
+      nframes = max(2, int(edge.length / dx))
+      indices = np.linspace(0, len(cpoints)-1, nframes+1, dtype=int)
+      for i, color in enumerate(['red', 'blue']):
+        vecs = edge.frame.frame[..., i]
+        points = pv.PolyData(cpoints[indices])
+        points['vectors'] = vecs[indices]
+        arrows = points.glyph(orient="vectors", scale=0.1, factor=0.05)
+        plotter.add_mesh(arrows, color=color)
 
   for i, furc in enumerate(graph.furcations):
     pc = pv.PolyData([furc.centroid])
@@ -35,6 +53,8 @@ def plot_vgraph(graph, plotter=None, show=True, show_normals=True):
       plotter.add_mesh(normal, color='black',
                                line_width=1,
                                label=f"Normal{i}")
+      plotter.add_point_labels(furc.centroid + 0.1 * furc.normal,
+                               [str(furc.indices.indices)])
 
   plotter.add_legend()
   if show:
