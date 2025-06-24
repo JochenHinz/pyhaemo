@@ -1,5 +1,4 @@
 from pyhaemo.types import Int, Float
-from pyhaemo.geo import ellipse
 from pyhaemo.geo.bif import repeated_knot_disc
 
 from typing import Sequence

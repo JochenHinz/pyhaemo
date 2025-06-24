@@ -21,7 +21,7 @@ def clip(value, a, b):
 @njit(cache=True)
 def rotate_vector(v, u, theta):
   """Eulero Rodrigues formula for rotating a vector v
-     around an axis u of an angle theta.
+     around an axis u by an angle theta.
   """
 
   u = normalize_vector(u)
@@ -83,8 +83,42 @@ def _compute_notwistframe(T, n0, zero_thresh):
   return Rs
 
 
+# @njit(cache=True)
+def _angular_notwistframe(tangents, n0, zero_thresh=1e-8):
+  n0 = normalize_vector(n0)
+
+  angles = np.empty(len(tangents), dtype=np.float64)
+  angles[0] = 0.0
+
+  normal_old = n0
+  for i, (told, tnew) in enumerate(zip(tangents, tangents[1:]), 1):
+    # compute the vector to rotate around
+    omega = np.cross(told, tnew)  # orthogonal to both told and tnew
+    norm = (omega**2).sum()**.5
+    if norm <= zero_thresh:
+      angle = angles[i-1]
+    else:
+      omega = omega / norm
+      increment = np.arccos(clip(np.dot(told, tnew), -1.0, 1.0))
+
+      # orthogonal to tnew
+      normal = rotate_vector(normal_old, omega, increment)
+
+      # find the angle between omega and normal in the tangent plane `tnew`.
+      cross = np.cross(normal_old, normal)
+      sin_theta = np.dot(tnew, cross)
+      cos_theta = np.dot(normal_old, normal)
+      angle = np.arctan2(sin_theta, cos_theta)
+
+      normal_old = normal
+
+    angles[i] = angle
+
+  return angles
+
+
 @njit(cache=True)
-def _compute_notwistframe_end_to_end(T, n0, nfinal, zero_thresh):
+def _compute_notwistframe_end_to_end(T, n0, nfinal, zero_thresh, exploit_symmetry=False):
   """
     Notwistframe where both ends are fixed.
   """
@@ -105,12 +139,14 @@ def _compute_notwistframe_end_to_end(T, n0, nfinal, zero_thresh):
   angle0 = np.arctan2(ext.cross2d(np.array([1, 0]), nfinal_loc[:2]),
                       np.array([1, 0], dtype=np.float64) @ nfinal_loc[:2])
 
-  # check if one of the options is closer to 0
-  # options = angle0 + np.linspace(-np.pi, np.pi, 5)[:-1]
+  if exploit_symmetry:
+    # check if one of the options is closer to 0
+    options = angle0 + np.linspace(-np.pi, np.pi, 5)[:-1]
 
-  # keep it
-  # myangle = options[np.argmin(np.abs(options))]
-  myangle = angle0
+    # keep it
+    myangle = options[np.argmin(np.abs(options))]
+  else:
+    myangle = angle0
 
   ans = np.empty_like(Rs_forward)
   for i, R in enumerate(Rs_forward):

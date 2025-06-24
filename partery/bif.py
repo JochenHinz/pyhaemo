@@ -7,6 +7,7 @@ from pyhaemo.geo.bif import repeated_knot_disc, hermite_pols_interval, \
 from pyhaemo.geo.interp import cubic_hermite_interpolation
 
 from notwist import rotate_vector
+from geo import project_onto_plane
 
 from typing import Sequence
 
@@ -77,13 +78,19 @@ def bif_from_matrices(matrices: Sequence[np.ndarray],
   evalR = [1], [.5]  # we evaluate the first patch (B) in this point
 
   ax = normalize(np.asarray(ax))
+  matrices = list(matrices)
 
   if exploit_symmetry:
     for i, matrix in enumerate(matrices):
-      mynormal = matrix[:, 0]
-      mytangent = matrix[:, 2]
-      rotations = [ rotate_vector(mynormal, mytangent, theta) for 
-                    theta in np.linspace(0, 2 * np.pi, 4, endpoint=False) ]
+      mynormal, mytangent = matrix[:, 0], matrix[:, 2]
+      rotations = np.linspace(0, 2 * np.pi, 4, endpoint=False)
+      normals = [ rotate_vector(mynormal,
+                                mytangent,
+                                theta) for theta in rotations ]
+      angle = rotations[ np.argmax([ _normal @ ax for _normal in normals ]) ]
+      matrices[i] = np.stack([rotate_vector(mynormal, mytangent, angle),
+                              rotate_vector(matrix[:, 1], mytangent, angle),
+                              mytangent], axis=1)
 
   discs = list(map(lambda x, c: c + (x * unitdisc[:, _]).sum(-1),
                    matrices, centerpoints))
@@ -140,7 +147,8 @@ def bif_from_matrices(matrices: Sequence[np.ndarray],
       H01, H11, *ignore = hermite_pols_interval(0, 1)
 
       # The tangent is the center point minus the center of the inlet.
-      tcomb = xC - center
+      norm = np.linalg.norm(xC - center)
+      tcomb = norm * normalize(project_onto_plane(xC - center, ax))
 
       # This is essentially to say that at x = -1, the tangent is `tL`
       # at x = 1, the tangent is `tR` and at x = 0, the tangent is `tcomb`.

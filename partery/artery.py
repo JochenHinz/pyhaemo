@@ -270,17 +270,19 @@ class VascularGraph(EdgeGraph):
 
     for furc in self.furcations:
       center = furc.centroid
+      # centerpoint_radius = np.mean([radii[i] for i in furc.indices])
 
       for i in furc:
         mypoint = endpoints[i]
         if np.linalg.norm(mypoint - center) < eps:
           continue
 
+        centerpoint_radius = radii[i]
+
         edge = edgedict[abs(i)]
-        rad = radii[i]
 
         # reverse the order if i > 0 to append at the end
-        points = ([[*center, rad]], edge.points)[SL if i < 0 else RSL]
+        points = ([[*center, centerpoint_radius]], edge.points)[SL if i < 0 else RSL]
         edge = edge.__class__(points=np.concatenate(points, axis=0))
         edgedict[abs(i)] = edge
 
@@ -316,8 +318,24 @@ class VascularGraph(EdgeGraph):
                        self.furcations)
 
 
+def prepare_graph(graph: VascularGraph):
+  return graph.normalize() \
+              .refit() \
+              .split_edges_proximity(eps=0.06) \
+              .merge_furcs_proximity(0.07) \
+              .refit() \
+              .recompute_centroids() \
+              .orient_nontrivial() \
+              .align_nontrivial_normals() \
+              .orient_trivial() \
+              .rtruncate(1) \
+              .furcomplete(npoints=1001) \
+              .delete_twofurcations() \
+              .align_frames()
+
+
 if __name__ == '__main__':
-  artery = VascularGraph.from_csv('data/csv/coro') \
+  artery = VascularGraph.from_csv('data/csv/brain') \
                         .normalize() \
                         .refit()
 

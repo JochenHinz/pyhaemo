@@ -161,7 +161,7 @@ class EdgeGraph(Immutable):
     indices = [i for i in self.indices if i in iedges]
     edges = [ edge for i, edge in zip(self.indices, self.edges) if i in iedges ]
     furcs = [ furc._edit(indices=[i for i in furc if abs(i) in iedges])
-              for furc in self.furcations ]
+              for furc in self.furcations if any(abs(i) in iedges for i in furc) ]
 
     return self._edit(indices=indices,
                       edges=edges,

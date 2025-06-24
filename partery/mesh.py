@@ -1,10 +1,9 @@
 from pyhaemo.util import np, _
-from pyhaemo.spl import NDSplineArray, NDSpline
+from pyhaemo.spl import NDSplineArray
 from pyhaemo.mesh import mesh_union
 
 from bif import bif_from_matrices
 from sgraph import SplineGraph
-from edge import SplineEdge, flip_spline
 from artery import VascularGraph
 from fit import fit_constrained
 
@@ -14,6 +13,7 @@ def make_spline_mesh(sgraph: SplineGraph,
                      dx: float = 0.02,
                      nref: int = 3,
                      rfac: int = 2,
+                     npoints_cross=5,
                      **kwargs):
   """Create a mesh from a SplineGraph."""
   xis = [ edge.knotvector[0].refine(nref).knots for edge in sgraph.edges ]
@@ -42,11 +42,9 @@ def make_spline_mesh(sgraph: SplineGraph,
     redges.append(sedge._edit(frame=rR))
     vessels.append( (cross[:, _] @ rR[_]).sum(-1) + (cross.unity @ cline) )
     npoints = max(2, int(sedge.length / dx))
-    vessel_meshes.append(mesh_union(*vessels[-1].quick_sample((5, 5, npoints)).ravel(), boundary=True))
+    vessel_meshes.append(mesh_union(*vessels[-1].quick_sample((npoints_cross, npoints_cross, npoints)).ravel(), boundary=True))
 
   sgraph_r = _sgraph._edit(edges=redges)
-  mat = np.array([ [0, 1, 0], [-1, 0, 0], [0, 0, 1] ])
-  mat = np.eye(3)
 
   furcations, furcmeshes = [], []
   for furc in _sgraph.nontrivial_furcations:
@@ -56,16 +54,19 @@ def make_spline_mesh(sgraph: SplineGraph,
     centerpoints = [edge.cline([edge.interval[1]]).ravel() for edge in myedges]
     radii = [edge.radius([edge.interval[1]])[0] for edge in myedges]
     bB = bT = np.mean(radii)
-    frames = [edge.frame([edge.interval[1]]).reshape(3, 3) @ mat for edge in myedges]
+    frames = [edge.frame([edge.interval[1]]).reshape(3, 3) for edge in myedges]
     furcations.append( bif_from_matrices(frames,
                                          centerpoints,
                                          normal,
                                          centroid,
                                          bB, bT, cross) )
     furcmeshes.append(
-      mesh_union(*furcations[-1].quick_sample((5, 5, 7)).ravel(), boundary=True))
+      mesh_union(*furcations[-1].quick_sample((npoints_cross, npoints_cross, 7)).ravel(), boundary=True))
 
   mesh = mesh_union(*vessel_meshes, boundary=True)
-  mesh = mesh | mesh_union(*furcmeshes, boundary=True)
+
+  # Heuristically, 1e-5 is better when symmetries are exploited.
+  # Else round-off can cause the interfaces to not be detected.
+  mesh = mesh_union(mesh, *furcmeshes, boundary=True, eps=1e-5)
 
   mesh.boundary.interfaces.plot()
