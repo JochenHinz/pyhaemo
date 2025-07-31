@@ -2,6 +2,7 @@ from pyhaemo.util import np, _
 from pyhaemo.spl import NDSpline, UnivariateKnotVector
 
 import arr
+from cox import univariate_spline_basis
 
 from functools import cached_property
 from abc import abstractmethod
@@ -74,38 +75,47 @@ class PieceWisePolynomial(Differentiable):
   """
 
   @classmethod
-  def from_NDSpline(cls, argument: arr.Array, spl: NDSpline):
-    from cox import univariate_spline_basis
+  def from_UnivariateKnotVector(cls, argument: arr.Array,
+                                     weights: arr.Array,
+                                     kv: UnivariateKnotVector):
 
     # coeffs:  (n, degree+1)
-    funcindices, elemindices, coeffs = univariate_spline_basis(spl.knotvector[0])
+    funcindices, elemindices, coeffs = univariate_spline_basis(kv)
 
     # weigts: (n, *spl.shape)
-    weights = spl.controlpoints[funcindices]
+    if isinstance(weights, np.ndarray):
+      weights = weights[funcindices]
+    elif isinstance(weights, arr.Constant):
+      weights = weights.value[funcindices]
+    else:
+      weights = arr.Take(weights, funcindices, 0)
 
     # (n, degree + 1, *spl.shape)
-    _coeffs = coeffs[(...,) + (_,) * spl.ndim] * weights[:, _]
+    _coeffs = coeffs[(...,) + (_,) * (len(weights.shape) - 1)] * weights[:, _]
 
-    (breaks,), (degree,) = spl.knots, spl.degree
+    breaks, degree = kv.knots, kv.degree
 
-    _coeffs = _coeffs.reshape(-1, degree + 1, *_coeffs.shape[1:]).sum(1)
+    _coeffs = _coeffs.reshape((-1, degree + 1, *_coeffs.shape[1:])).sum(1)
 
-    return cls(argument,
-               _coeffs,
-               breaks)
+    return cls(argument, _coeffs, breaks)
 
-  def __init__(self, argument: arr.Array,
-                     weights: ArrayLike | arr.Constant,
-                     breaks: ArrayLike | arr.Constant):
+  @classmethod
+  def from_NDSpline(cls, argument: arr.Array, spl: NDSpline):
+    assert spl.nvars == 1, NotImplementedError
+    return cls.from_UnivariateKnotVector(argument, spl.controlpoints, spl.knotvector[0])
+
+  def __init__(self, argument: arr.Array, weights: arr.Array, breaks: arr.Array):
     self.argument = arr.asarray(argument)
-    self.weights = arr.asarray(weights)
+    self.weights = arr.Constant(weights)
     self.breaks = arr.asarray(breaks)
+
     assert len(self.weights.shape) >= 2
+
     self.order = self.weights.shape[1]
     shape = self.weights.shape[2:]
-    self.interval = jnp.array([self.breaks.value[0], self.breaks.value[-1] - 1e-10])
+
     assert self.breaks.shape == (self.weights.shape[0] + 1,)
-    super().__init__([self.argument], shape=shape)
+    super().__init__([self.argument, self.weights, self.breaks], shape=shape)
 
   def _derivative(self):
     indices = jnp.arange(1, self.order).astype(float)
@@ -115,12 +125,12 @@ class PieceWisePolynomial(Differentiable):
   @cached_property
   def func(self):
     def _func(**kwargs):
-      x = jnp.clip(self.argument(**kwargs), self.interval[0], self.interval[1])
       vals = self.breaks(**kwargs)
+      x = jnp.clip(self.argument(**kwargs), vals[0], vals[-1])
       idx = jnp.searchsorted(vals, x, side='right') - 1
 
       powers = jnp.power(x, jnp.arange(self.order, dtype=float))
-      coeffs = self.weights.value[idx]  # shape: (order, ...)
+      coeffs = self.weights(**kwargs)[idx]  # shape: (order, ...)
       result = jnp.tensordot(powers, coeffs, axes=([0], [0]))  # broadcasted dot product
 
       return result

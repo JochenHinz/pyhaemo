@@ -1,13 +1,18 @@
-from pyhaemo.util import np, normalize, _
+from pyhaemo.util import np, normalize, _, gauss_quadrature
 from pyhaemo.spl import UnivariateKnotVector, NDSpline
+from pyhaemo.log import logger as log
+from pyhaemo.mesh import mesh_union
 
 import arr
 from jspl import PieceWisePolynomial
+from opt import cubic_hermite_curve
+from bif import bif_from_matrices
 
 from scipy.spatial import cKDTree
 from scipy import optimize
 import pyvista as pv
 import jax
+import vtk
 
 
 def rotation_around_axis(theta, v, t):
@@ -90,32 +95,43 @@ def find_inflection_points(sgraph, eps=0.1):
   plotter.show()
 
 
-def opt_inflection(sgraph):
+def opt_inflection(sgraph, dx=0.01):
   furcations = sgraph.nontrivial_furcations
+
+  # (i0, side0): (point, i1, (s0, theta0))
   zeros = {}
   pairs = []
+  xi = np.linspace(.9, 1, 101)
 
   for furcation in furcations:
     indices = furcation.indices.indices
+    n = len(indices)
+
+    # get all edges ending in the furcation
     edges = sgraph.get_edges(indices)
 
-    centerlines = [edge.cline for edge in edges]
-    radii = [edge.radius for edge in edges]
-    frames = [edge.frame for edge in edges]
+    # get centerlines, radii, frames
+    _centerlines = [edge.cline for edge in edges]
+    _radii = [edge.radius for edge in edges]
+    _frames = [edge.frame for edge in edges]
 
-    centerpoint = furcation.centroid
-    normal = furcation.normal
+    # centerpoint = furcation.centroid
+    # normal = furcation.normal
 
-    normalframes, binormalframes = [[frame[:, i] for frame in frames] for i in (0, 1)]
+    # get normal and binormal frames
+    _normalframes, _binormalframes = [[frame[:, i] for frame in _frames] for i in (0, 1)]
 
-    s = [arr.Argument(f's{i}', ()) for i in range(3)]
-    theta = [arr.Argument(f'theta{i}', ()) for i in range(3)]
+    # (s0, s1, ...), (theta0, theta1, ...)
+    s = [arr.Argument(f's{i}', ()) for i in range(n)]
+    theta = [arr.Argument(f'theta{i}', ()) for i in range(n)]
 
-    centerlines = [ PieceWisePolynomial.from_NDSpline(_s, curve) for _s, curve in zip(s, centerlines) ]
-    radii = [ PieceWisePolynomial.from_NDSpline(_s, r) for _s, r in zip(s, radii) ]
-    normalframes = [ PieceWisePolynomial.from_NDSpline(_s, n) for _s, n in zip(s, normalframes) ]
-    binormalframes = [ PieceWisePolynomial.from_NDSpline(_s, b) for _s, b in zip(s, binormalframes) ]
+    # convert to JAX format
+    centerlines = [ PieceWisePolynomial.from_NDSpline(_s, curve) for _s, curve in zip(s, _centerlines) ]
+    radii = [ PieceWisePolynomial.from_NDSpline(_s, r) for _s, r in zip(s, _radii) ]
+    normalframes = [ PieceWisePolynomial.from_NDSpline(_s, n) for _s, n in zip(s, _normalframes) ]
+    binormalframes = [ PieceWisePolynomial.from_NDSpline(_s, b) for _s, b in zip(s, _binormalframes) ]
 
+    # parameterize associated surfaces
     surfaces = [ curve + r * (n * arr.Sin(th) + b * arr.Cos(th))
                  for curve, r, n, b, th in zip(centerlines,
                                                radii,
@@ -123,16 +139,19 @@ def opt_inflection(sgraph):
                                                binormalframes,
                                                theta) ]
 
+    # iterate over the pairs of surfaces and their associated edge indices
     for i, (j0, j1, surf0, surf1) in enumerate(zip(indices,
                                                    np.roll(indices, -1),
                                                    surfaces,
                                                    np.roll(surfaces, -1))):
 
-      key0, key1, key2, key3 = f's{i}', f's{(i+1) % 3}', f'theta{i}', f'theta{(i+1) % 3}'
+      # s_i, s_(i+1), theta_i, theta_(i+1)
+      key0, key1, key2, key3 = f's{i}', f's{(i+1) % n}', f'theta{i}', f'theta{(i+1) % n}'
 
       # + 0.1 * ((surf0 - centerpoint) * normal).sum() ** 2
       _func = ((surf0 - surf1) ** 2).sum()  # + (theta[i] ** 2) + (theta[(i+1) % 3] - np.pi) ** 2
 
+      # define intersection point cost function
       @jax.jit
       def costfunc(x):
         s0, s1, theta0, theta1 = x
@@ -142,68 +161,229 @@ def opt_inflection(sgraph):
           key2: theta0,
           key3: theta1
         }
-        ret = _func(**kwargs)
-        return ret
+        return _func(**kwargs)
 
-      x = optimize.minimize(costfunc, [.5, .5, 0, np.pi], bounds=[(0, 1)] * 2 +
-                                                                 [(-np.pi/16, np.pi / 16)] +
-                                                                 [(np.pi - np.pi/16, np.pi + np.pi/16)],
-                            method='L-BFGS-B', options={'disp': True})
-      print(x.success)
+      p0 = _centerlines[i](xi) + _radii[i](xi)[:, _] * _binormalframes[i](xi)
+      p1 = _centerlines[(i+1) % n](xi) + _radii[(i+1) % n](xi)[:, _] * _binormalframes[(i+1) % n](xi)
+
+      I, J = np.unravel_index(np.argmin(((p0[:, _] - p1[_])**2).sum(-1)), xi.shape + xi.shape)
+
+      PI16 = np.pi / 16
+      x = optimize.minimize(costfunc,
+                            [xi[I], xi[J], 0, np.pi],
+                            bounds=[(0, 1)] * 2 +
+                                   [(-PI16, PI16)] +
+                                   [(np.pi - PI16, np.pi + PI16)],
+                            method='L-BFGS-B',
+                            options={'disp': True})
+
+      log.warning(f"Furcation {indices} pair {j0, j1} optimization success: {x.success}")
+
       kwargs = dict(zip([key0, key1, key2, key3], x.x))
-      zeros[j0] = (np.asarray((surf0(**kwargs)) + surf1(**kwargs)) / 2, costfunc(x.x), x.x[::2])
-      zeros[j1] = (np.asarray((surf0(**kwargs)) + surf1(**kwargs)) / 2, costfunc(x.x), x.x[1::2])
+      point = np.asarray((surf0(**kwargs) + surf1(**kwargs)) / 2)
+
+      zeros[(j0, 'r')] = (point, x.x[::2])
+      zeros[(j1, 'l')] = (point, x.x[1::2])
+
+      # ('r', 'l') ordering implied
       pairs.append((j0, j1))
 
-  print(zeros)
-  import ipdb
-  ipdb.set_trace()
+  return zeros, tuple(pairs)
 
-  sidecurves = []
-  kv = UnivariateKnotVector(np.linspace(0, 1, 2), degree=2)
-  for (j0, j1) in pairs:
-    point, fval, (s0, th0) = zeros[j0]
-    point, fval, (s1, th1) = zeros[j1]
-    edges = sgraph.get_edges([j0, j1])
-    clines = [edge.cline for edge in edges]
-    radii = [edge.radius for edge in edges]
-    binormals = [edge.frame[:, 1] for edge in edges]
 
-    if -j0 in zeros:
-      s0 = max(0.9 * s0, 1 - zeros[-j0][2][0])
-    else:
-      s0 = .9 * s0
+def find_sidecurves(sgraph, opt_result, pairs, eps=10, dx=0.005):
+  furcations = sgraph.nontrivial_furcations
+  allindices = sorted(set.union(*map(set, (furc.indices for furc in furcations))))
+  setindices = set(allindices)
+  n = len(allindices)
 
-    if -j1 in zeros:
-      s1 = max(0.9 * s1, 1 - zeros[-j1][2][0])
-    else:
-      s1 = .9 * s1
+  bounds0 = [(0.05, min(opt_result[(i, 'r')][1][0],
+                        opt_result[(i, 'l')][1][0]) - 0.01) for i in allindices]
 
-    x0 = clines[0]([s0]).ravel() + radii[0]([s0]).ravel() * binormals[0]([s0]).ravel()
-    x1 = clines[1]([s1]).ravel() - radii[1]([s1]).ravel() * binormals[1]([s1]).ravel()
-    sidecurves.append( NDSpline([kv], np.stack([x0, point, x1])) )
+  pairs = []
+  for i, index in enumerate(allindices):
+    if index > 0:
+      break
+    if -index in setindices:
+      pairs.append([i, allindices.index(-index)])
+
+  pairs = np.asarray(pairs, dtype=int)
+
+  cons = ()
+  if len(pairs):
+    def func(x):
+      x = x[:n]
+      return (x[pairs[:, 0]] + x[pairs[:, 1]]) - 1.0
+    cons += ({'type': 'ineq', 'fun': func},)
+
+  qweights, qpoints = gauss_quadrature(0, 1, 5)
+  arg = arr.Argument('dummy', ())
+  curves, intersectionpoints = [], []
+
+  cfuncs = []
+  for furc in furcations:
+    edges = sgraph.get_edges(furc.indices.indices)
+
+    s = [arr.Argument(f's{i}', ()) for i in furc.indices]
+    scalings_R = [arr.Argument(f'scaling_R{i}', ()) for i in furc.indices]
+    scalings_L = [arr.Argument(f'scaling_L{i}', ()) for i in furc.indices]
+
+    centerlines = \
+      [PieceWisePolynomial.from_NDSpline(_s, edge.cline) for _s, edge in zip(s, edges)]
+
+    radii = \
+      [PieceWisePolynomial.from_NDSpline(_s, edge.radius) for _s, edge in zip(s, edges)]
+
+    binormals = \
+      [PieceWisePolynomial.from_NDSpline(_s, edge.frame[:, 1]) for _s, edge in zip(s, edges)]
+
+    tangents = [cline.derivative(1) for cline in centerlines]
+    tangents = [t / ((t**2).sum()**.5) for t in tangents]
+
+    sidecurves_R = [cline + r * binormal for cline, r, binormal in zip(centerlines,
+                                                                       radii,
+                                                                       binormals)]
+
+    sidecurves_L = [cline - r * binormal for cline, r, binormal in zip(centerlines,
+                                                                       radii,
+                                                                       binormals)]
+
+    mycurves, mypoints = [], []
+
+    for i, cR, cL, sR, sL, _tR, _tL in zip(furc.indices,
+                                           sidecurves_R,
+                                           np.roll(sidecurves_L, -1),
+                                           scalings_R,
+                                           np.roll(scalings_L, -1),
+                                           tangents,
+                                           np.roll(tangents, -1)):
+
+      mycurves.append( cubic_hermite_curve(arg, cR, sR * _tR, cL, -sL * _tL) )
+      mypoints.append( opt_result[(i, 'r')][0] )
+
+    curves.extend(mycurves)
+    intersectionpoints.extend(mypoints)
+
+    for curve, point in zip(mycurves, mypoints):
+      curvepp = curve.derivative(2)._edit(argument=qpoints)
+      smoothness_cost = (qpoints[:, _] * (curvepp**2)).sum()
+
+      evalpoint = curve._edit(argument=arr.Constant(.5))
+      distance_cost = ((evalpoint - point) ** 2).sum()
+
+      cfuncs.append( distance_cost + eps * smoothness_cost)
+
+  keys = tuple(f's{i}' for i in allindices) + \
+         tuple(f'scaling_R{i}' for i in allindices) + \
+         tuple(f'scaling_L{i}' for i in allindices)
+
+  @jax.jit
+  def costfunc(x):
+    kwargs = dict(zip(keys, x))
+    return sum(func(**kwargs) for func in cfuncs)
+
+  bounds = bounds0 + [(.05, None)] * n + [(.05, None)] * n
+  x0 = [b[1] for b in bounds0] + [.1] * n + [.1] * n
+
+  x = optimize.minimize(costfunc, x0, bounds=bounds,
+                                      constraints=cons,
+                                      options={'disp': True})
+
+  log.warning(f"Sidecurve optimization success: {x.success}")
+
+  solvekwargs = dict(zip(keys, x.x))
+
+  xi = np.linspace(0, 1, 201)
+  _curves = [curve._edit(argument=xi) for curve in curves]
 
   plotter = sgraph.plot(show=False, show_normals=False)
 
-  for key, val in zeros.items():
-    plotter.add_points(val[0][_], color='red', point_size=10, render_points_as_spheres=True)
+  for curve in _curves:
+    plotter.add_points(np.asarray(curve(**solvekwargs)),
+                       color='green',
+                       point_size=5,
+                       render_points_as_spheres=True)
 
-  s, theta = np.linspace(0, .98, 101), np.array([0, np.pi])  # np.linspace(0, 2 * np.pi, 20, endpoint=False)
+  edges = sgraph.edges
+  lengths = [edge.length for edge in edges]
+  centerlines = [edge.cline for edge in edges]
+  radii = [edge.radius for edge in edges]
+  frames = [edge.frame for edge in edges]
+  theta = [0, np.pi]
 
-  for furc in furcations:
+  for curve, rad, frame, length in zip(centerlines, radii, frames, lengths):
+    npoints = int(length / dx)
+    s = np.linspace(0.0, 1, max(2, npoints))
+    X, r, f = curve(s), rad(s), frame(s)
+    for _X, _r, _f in zip(X, r, f):
+      points = _X[_] + _r * (_f[:, 0][_] * np.sin(theta)[:, _] + _f[:, 1][_] * np.cos(theta)[:, _])
+      plotter.add_points(points, color='blue', point_size=5, render_points_as_spheres=True)
+
+  plotter.add_points(np.array(intersectionpoints), color='red', point_size=10, render_points_as_spheres=True)
+
+  return solvekwargs, plotter
+
+
+def make_bifs(sgraph, solvekwargs: dict, plotter=None):
+
+  if plotter is None:
+    plotter = sgraph.plot(show=False, show_normals=False)
+
+  bifs = []
+  for furc in sgraph.nontrivial_furcations:
+
     edges = sgraph.get_edges(furc.indices.indices)
     centerlines = [edge.cline for edge in edges]
     radii = [edge.radius for edge in edges]
     frames = [edge.frame for edge in edges]
 
-    for curve, rad, frame in zip(centerlines, radii, frames):
-      X, r, f = curve(s), rad(s), frame(s)
-      for _X, _r, _f in zip(X, r, f):
-        points = _X[_] + _r * (_f[:, 0][_] * np.sin(theta)[:, _] + _f[:, 1][_] * np.cos(theta)[:, _])
-        plotter.add_points(points, color='blue', point_size=5, render_points_as_spheres=True)
+    normal = furc.normal
+    cpoint = furc.centroid
 
-  for curve in sidecurves:
-    plotter.add_points(curve(s), color='green', point_size=5, render_points_as_spheres=True)
+    matrices, centerpoints, scalingsR, scalingsL = [], [], [], []
+
+    myradii = []
+    for i, cline, radius, frame in zip(furc.indices, centerlines, radii, frames):
+      s = solvekwargs[f's{i}']
+      scalingR = solvekwargs[f'scaling_R{i}']
+      scalingL = solvekwargs[f'scaling_L{i}']
+
+      myradii.append(radius([s]))
+
+      matrices.append(frame([s]).reshape(3, 3) * radius([s]))
+
+      centerpoints.append(cline([s]).ravel())
+
+      scalingsR.append(scalingR)
+      scalingsL.append(scalingL)
+
+    bT = bB = np.mean(myradii)
+
+    bifs.append( bif_from_matrices(matrices,
+                                   centerpoints,
+                                   scalingsR,
+                                   scalingsL,
+                                   normal,
+                                   cpoint,
+                                   bB,
+                                   bT) )
+
+  meshes = [ mesh_union(*bif.quick_sample((5, 5, 11)).ravel(), boundary=True)
+                                                               for bif in bifs ]
+
+  for mesh in meshes:
+    nelems = len(mesh.elements)
+    cell_type = { 'point': vtk.VTK_POINTS,
+                  'line': vtk.VTK_LINE,
+                  'triangle': vtk.VTK_TRIANGLE,
+                  'quadrilateral': vtk.VTK_QUAD,
+                  'tetrahedron': vtk.VTK_TETRA,
+                  'hexahedron': vtk.VTK_HEXAHEDRON }[mesh.element_name]
+    points = mesh.points
+    elements = np.concatenate([np.full((nelems, 1), mesh.nverts, dtype=int), mesh.pvelements], axis=1).astype(int)
+
+    grid = pv.UnstructuredGrid(elements, np.array([cell_type] * nelems), points)
+    plotter.add_mesh(grid, show_edges=True)
 
   plotter.show()
 
@@ -212,7 +392,7 @@ def test():
   import sys
   sys.path.append('../')
   from artery import VascularGraph, prepare_graph
-  graph = prepare_graph(VascularGraph.from_csv('../data/csv/aorta'))
+  graph = prepare_graph(VascularGraph.from_csv('../data/csv/brain'))
 
   # print(graph.nontrivial_furcations[8].indices.indices)
   # graph = graph.take( graph.nontrivial_furcations[1].indices.indices )
@@ -221,7 +401,10 @@ def test():
   sgraph = graph.to_spline_graph(21)
   # sgraph.plot()
 
-  opt_inflection(sgraph)
+  opt_result, pairs = opt_inflection(sgraph)
+
+  solvekwargs, plotter = find_sidecurves(sgraph, opt_result, pairs)
+  make_bifs(sgraph, solvekwargs, plotter=plotter)
 
 
 if __name__ == '__main__':
