@@ -15,7 +15,7 @@ def run():
                                                                   freq_cut=0,
                                                                   plot=True)
 
-    plot_WSS()
+    # plot_WSS()
 
     # create the physical centerline and radii
     physical_cen, physical_rad = create_centerline(cleaned_4D_cen, 

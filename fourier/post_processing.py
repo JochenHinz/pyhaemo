@@ -41,7 +41,7 @@ def create_mesh(centerline: np.array,
                   radii=radii * 10**-3,
                   centerline_points=centerline * 10**-3,
                   normal=None,
-                  export=False,
+                  export=export,
                   filename=filename)
 
     return mesh
@@ -60,21 +60,27 @@ def incremental_displacement(centerlines: list, radii: list):
     ref_mesh = create_mesh(radii=radii[0],
                            centerline=centerlines[0],
                            export=True,
-                           filename=f'/home/fabio/pyhaemo/examples/fourier/meshes/vessel_mesh_{0:04d}.msh')
+                           filename=f'/home/marcinno/pyhaemo/fourier/meshes/vessel_mesh_{0:05d}.msh')
 
     for i in range(len(centerlines)-1):
 
         mesh_old = create_mesh(radii=radii[i],
                                centerline=centerlines[i],
                                export=False,
-                               filename=f'/home/fabio/pyhaemo/examples/fourier/meshes/vessel_mesh_{i:04d}.vtk')
+                               filename=f'/home/marcinno/pyhaemo/fourier/meshes/vessel_mesh_{i:05d}.vtk')
 
         mesh_new = create_mesh(radii=radii[i+1],
                                centerline=centerlines[i+1],
                                export=False,
-                               filename=f'/home/fabio/pyhaemo/examples/fourier/meshes/vessel_mesh_{i+1:04d}.vtk')
+                               filename=f'/home/marcinno/pyhaemo/fourier/meshes/vessel_mesh_{i+1:05d}.vtk')
 
+
+        filename = f"/home/marcinno/pyhaemo/fourier/displacement_4e-5/clean_vector_{i+1:05d}.hdf5"
         incremental_displacement.append(mesh_new.points - mesh_old.points)
+	#filename = f"/home/marcinno/pyhaemo/fourier/displacement_5e-5/clean_vector_{i+1:05d}.hdf5" # Generate filenames like vector_0000.h5, vector_0001.h5, etc.
+        with h5py.File(filename, 'w') as hf:
+            hf.create_dataset('vector', data=incremental_displacement[-1])
+            print(f"Saved vector to {filename}")
 
     return incremental_displacement
 
@@ -85,7 +91,7 @@ def save_to_hdf5(displacement: list):
 
     for i, vector in enumerate(displacement):
         vec = vector.flatten()
-        filename = f"/home/fabio/pyhaemo/examples/fourier/displacement/clean_vector_{i+1:04d}.hdf5"  # Generate filenames like vector_0000.h5, vector_0001.h5, etc.
+        filename = f"/home/marcinno/pyhaemo/fourier/displacement_4e-5_last/clean_vector_{i+1:05d}.hdf5"  # Generate filenames like vector_0000.h5, vector_0001.h5, etc.
         with h5py.File(filename, 'w') as hf:
             hf.create_dataset('vector', data=vec)
             print(f"Saved vector to {filename}")

@@ -8,7 +8,7 @@ def fourier_1D(array: np.array, freq_cut: int = 0, over_sampling=False):
     Compute the Fourier series of a 1D array and reconstruct the signal
     cutting the frequencies higher than freq_cut.
     """
-    
+
     # create a linear interpolation between each point in the array, to have
     # over sampling
     if over_sampling:
@@ -33,7 +33,7 @@ def fourier_1D(array: np.array, freq_cut: int = 0, over_sampling=False):
     Xk = Xk * mask
 
     # If I use M > 22, I get a wrong reconstruction
-    t = np.linspace(0, 1, 8000, endpoint=False)
+    t = np.linspace(0, 1, 32000, endpoint=False)
 
     result = np.zeros_like(t, dtype=complex)
     for k in range(M):
