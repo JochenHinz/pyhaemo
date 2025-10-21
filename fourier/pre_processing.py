@@ -1,5 +1,5 @@
 import numpy as np
-from fourier import fourier_1D, fourier_3D, plot_fourier
+from fourier import fourier_1D, fourier_3D
 
 def load_data_frames():
     """
@@ -47,7 +47,11 @@ def generate_4D_data(centerlines, radii):
     return cen_4D, rad_4D
 
 
-def generate_fourier_interpolant(cen_4D, rad_4D, freq_cut=0, plot=False, save_csv=False):
+def generate_fourier_interpolant(cen_4D: list, 
+                                 rad_4D: list,
+                                 timestep: float,
+                                 freq_cut: int,
+                                 plot=True):
     """
     from the 4D data, I generate the fourier interpolant
     """
@@ -57,21 +61,35 @@ def generate_fourier_interpolant(cen_4D, rad_4D, freq_cut=0, plot=False, save_cs
 
     for cen, rad in zip(cen_4D, rad_4D):
         # fourier transform
-        fourier_cen = fourier_3D(cen, freq_cut)
-        fourier_rad = fourier_1D(rad, freq_cut)
+        fourier_cen = fourier_3D(cen, timestep=timestep, freq_cut=freq_cut)
+        fourier_rad = fourier_1D(rad, timestep=timestep, freq_cut=freq_cut)
         cleaned_4D_cen.append(fourier_cen)
         cleaned_4D_rad.append(fourier_rad)
 
-    # let's plot how cutting frequencies affects the motion of the x-coordinate
-    # of the first point of the centerline
     if plot:
-        freqs_to_cut = [0]
-        original_signal = cen_4D[0][:,0]
-        cleaned_signals = [fourier_1D(original_signal, fc) for fc in freqs_to_cut]
-        plot_fourier(original_signal, cleaned_signals, freqs_to_cut)
-
-    if save_csv:
-            np.savetxt(f"cleaned_centerline_x_first_point.csv", cleaned_signals[0], delimiter=",")
-            print(f"saved cleaned_centerline_x_first_point.csv")
+        plot_fourier_interpolant(cen_4D, timestep=timestep, freq_cut_plot= [0, 3, 5, 7, 10])
 
     return cleaned_4D_cen, cleaned_4D_rad
+
+
+def plot_fourier_interpolant(cen_4D, timestep, freq_cut_plot):
+    import matplotlib.pyplot as plt
+    plt.figure()
+
+    for freq_cut in freq_cut_plot:
+        cleaned_4D_cen = []
+        for cen in cen_4D:
+            # fourier transform
+            fourier_cen = fourier_3D(cen, timestep=timestep, freq_cut=freq_cut)
+            cleaned_4D_cen.append(fourier_cen)
+            disp_form_ref = np.linalg.norm(cleaned_4D_cen[0][1:] - cleaned_4D_cen[0][0], axis=1)
+            plt.plot(disp_form_ref, label=f'freq cut {freq_cut}', linewidth=10)
+            break   # only the first point
+
+    plt.title("Reference Displacement vs frequency cut", fontsize=28)
+    plt.xlabel("Time", fontsize=28)
+    plt.ylabel("Displacement from reference", fontsize=28)
+    plt.tick_params(axis='both', labelsize=30)
+    plt.legend(fontsize=28)
+    plt.grid()
+    plt.show()

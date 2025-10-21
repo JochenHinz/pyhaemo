@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 
 
 
-def fourier_1D(array: np.array, freq_cut: int = 0, over_sampling=False):
+def fourier_1D(array: np.array, timestep: float, freq_cut: int, over_sampling=False):
     """
     Compute the Fourier series of a 1D array and reconstruct the signal
     cutting the frequencies higher than freq_cut.
@@ -32,8 +32,8 @@ def fourier_1D(array: np.array, freq_cut: int = 0, over_sampling=False):
     mask = np.abs(freqs) <= freq_to_keep
     Xk = Xk * mask
 
-    # If I use M > 22, I get a wrong reconstruction
-    t = np.linspace(0, 1, 32000, endpoint=False)
+    T = int(0.8/timestep)
+    t = np.linspace(0, 1, T, endpoint=False)
 
     result = np.zeros_like(t, dtype=complex)
     for k in range(M):
@@ -44,7 +44,7 @@ def fourier_1D(array: np.array, freq_cut: int = 0, over_sampling=False):
     return result
 
 
-def fourier_3D(array: np.array, freq_cut: int = 0):
+def fourier_3D(array: np.array, timestep: float, freq_cut: int):
     """
     Compute the Fourier series of a 3D array and reconstruct the signal
     """
@@ -54,9 +54,9 @@ def fourier_3D(array: np.array, freq_cut: int = 0):
     y = array[:, 1]
     z = array[:, 2]
 
-    cleaned_signal_x = fourier_1D(x, freq_cut)
-    cleaned_signal_y = fourier_1D(y, freq_cut)
-    cleaned_signal_z = fourier_1D(z, freq_cut)
+    cleaned_signal_x = fourier_1D(x, timestep=timestep, freq_cut=freq_cut)
+    cleaned_signal_y = fourier_1D(y, timestep=timestep, freq_cut=freq_cut)
+    cleaned_signal_z = fourier_1D(z, timestep=timestep, freq_cut=freq_cut)
 
     cleaned_signal = np.stack([cleaned_signal_x,
                                cleaned_signal_y,
@@ -64,7 +64,7 @@ def fourier_3D(array: np.array, freq_cut: int = 0):
 
     return cleaned_signal
 
-
+#XXX: deprecated
 def plot_fourier(original_signal: list,
                  cleaned_signals: list,
                  freqs_cut: list[int]):
