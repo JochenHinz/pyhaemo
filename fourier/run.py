@@ -28,4 +28,4 @@ def run(timestep:float, freq_cut:int):
 
 if __name__ == "__main__":
 
-    run(timestep=0.00005, freq_cut=7)
+    run(timestep=0.001, freq_cut=7)

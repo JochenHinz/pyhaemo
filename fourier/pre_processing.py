@@ -51,7 +51,7 @@ def generate_fourier_interpolant(cen_4D: list,
                                  rad_4D: list,
                                  timestep: float,
                                  freq_cut: int,
-                                 plot=True):
+                                 plot=False):
     """
     from the 4D data, I generate the fourier interpolant
     """

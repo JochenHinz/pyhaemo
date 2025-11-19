@@ -31,6 +31,7 @@ def create_selecters(X, vessel):
 
 def vessel(nelems_centerline,
            nelems_cross_section,
+           nelems_z,
            radii,
            centerline_points,
            normal=None,
@@ -90,7 +91,7 @@ def vessel(nelems_centerline,
   # create dense mesh
   eval_mesh = rectilinear([nelems_cross_section,
                            nelems_cross_section,
-                                            301])
+                                        nelems_z])
 
   # create a mesh sampled from each patch and take its boundary union
   # to provide one hexmesh for the entire geometry.
