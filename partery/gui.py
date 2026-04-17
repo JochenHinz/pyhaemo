@@ -68,6 +68,12 @@ RED_BIF_SIZE_PX = 12.0
 # List- or 3D-selected bifurcation: large black centroid marker (white GL background).
 SEL_BIF_BLACK_SIZE_PX = 26.0
 
+# --- Centerline 3D picking (screen pixels) ----------------------------------
+# Max screen-space distance (click pixel → nearest polyline segment) to accept
+# a centerline click. Looser than the bifurcation threshold because polylines
+# are thin and the user aims for a line, not a marker.
+CL_PICK_TOLERANCE_PX = 10.0
+
 # --- Mesh preview fallback (subsampled points if boundary wireframe unavailable)
 MAX_MESH_PREVIEW_POINTS = 30000
 
@@ -166,30 +172,62 @@ def _full_boundary_wireframe_positions(volume_points, boundary_elements, nverts)
   return pos
 
 
+def _boundary_face_tris(boundary_elements, unique_idx, nverts):
+  """Triangulate boundary facets and remap indices to the compact scatter array.
+
+  ``unique_idx`` is the sorted ``np.unique`` of ``boundary_elements`` used to
+  build the scatter vertex buffer. Returns ``(n_tris, 3)`` int64 indices into
+  that compact vertex buffer, or ``None`` if facet shape is unsupported.
+  """
+  bel = np.asarray(boundary_elements, dtype=np.int64)
+  idx = np.asarray(unique_idx, dtype=np.int64)
+  if bel.ndim != 2 or bel.size == 0 or idx.size == 0:
+    return None
+  lookup = np.empty(int(idx.max()) + 1, dtype=np.int64)
+  lookup[idx] = np.arange(idx.size, dtype=np.int64)
+  local = lookup[bel]
+  if nverts == 4 and local.shape[1] == 4:
+    # Quad local layout matches ``_QUAD_BOUNDARY_LOCAL_EDGES``:
+    #   2 --- 3
+    #   |     |
+    #   0 --- 1
+    # → triangles (0,1,3) and (0,3,2).
+    t1 = np.column_stack([local[:, 0], local[:, 1], local[:, 3]])
+    t2 = np.column_stack([local[:, 0], local[:, 3], local[:, 2]])
+    return np.ascontiguousarray(np.concatenate([t1, t2], axis=0))
+  if nverts == 3 and local.shape[1] == 3:
+    return np.ascontiguousarray(local.copy())
+  return None
+
+
 def _boundary_preview_arrays(mesh):
   """Precompute OpenGL arrays for the **entire** exterior surface of ``mesh``.
 
   Returns
   -------
-  wire_pos, scatter_xyz : ndarray or None
-    ``wire_pos`` is line-pair vertices; ``scatter_xyz`` is one row per distinct
-    boundary node. On failure (no boundary), returns ``(None, None)``.
+  wire_pos, scatter_xyz, face_tris : ndarray or None
+    ``wire_pos`` is line-pair vertices for the wireframe;
+    ``scatter_xyz`` is one row per distinct boundary node (vertex buffer);
+    ``face_tris`` is ``(n_tris, 3)`` int indices into ``scatter_xyz`` for the
+    filled boundary surface. On failure (no boundary), returns
+    ``(None, None, None)``.
   """
   try:
     b = mesh.boundary
   except Exception:
-    return None, None
+    return None, None, None
   pts = np.asarray(mesh.points, dtype=float)
   bel = np.asarray(b.elements, dtype=np.int64)
   if bel.size == 0 or pts.size == 0:
-    return None, None
+    return None, None, None
   nv = int(getattr(b, "nverts", bel.shape[1]))
   wpos = _full_boundary_wireframe_positions(pts, bel, nv)
   if wpos is None:
-    return None, None
+    return None, None, None
   idx = np.unique(bel.ravel())
   scatter = np.ascontiguousarray(pts[np.asarray(idx, dtype=np.int64), :3].copy())
-  return wpos, scatter
+  tris = _boundary_face_tris(bel, idx, nv)
+  return wpos, scatter, tris
 
 
 def mesh_statistics(mesh):
@@ -408,10 +446,11 @@ def _extract_boundary_points_for_preview(mesh):
 class MeshComputeThread(QThread):
   """Runs ``work_fn`` off the GUI thread; results are delivered via Qt signals.
 
-  ``finished_ok`` payloads: ``(mesh, aux_points, stats, boundary_wire, boundary_scatter)``.
+  ``finished_ok`` payloads:
+    ``(mesh, aux_points, stats, boundary_wire, boundary_scatter, boundary_faces)``.
   """
 
-  finished_ok = pyqtSignal(object, object, object, object, object)
+  finished_ok = pyqtSignal(object, object, object, object, object, object)
   finished_err = pyqtSignal(str)
 
   def __init__(self, work_fn):
@@ -420,8 +459,8 @@ class MeshComputeThread(QThread):
 
   def run(self):
     try:
-      mesh, bpts, stats, bwire, bscatter = self._work_fn()
-      self.finished_ok.emit(mesh, bpts, stats, bwire, bscatter)
+      mesh, bpts, stats, bwire, bscatter, bfaces = self._work_fn()
+      self.finished_ok.emit(mesh, bpts, stats, bwire, bscatter, bfaces)
     except BaseException:
       self.finished_err.emit(traceback.format_exc())
 
@@ -444,8 +483,10 @@ class Scene3D(QWidget):
   def __init__(self, parent=None):
     super().__init__(parent)
     self.on_bif_click = None
+    self.on_cl_click = None
     self.mesh_simplified = False
     self._bif_pick = []
+    self._cl_pick = []
     layout = QVBoxLayout(self)
     if gl is None:
       self.view = None
@@ -462,9 +503,15 @@ class Scene3D(QWidget):
     self.items = []
 
   def _handle_left_click(self, sx, sy):
+    # Bifurcation markers are small; try them first (they beat the looser
+    # centerline tolerance at close range).
     key = self._pick_bif(sx, sy)
     if key is not None and callable(self.on_bif_click):
       self.on_bif_click(key)
+      return
+    cl_id = self._pick_centerline(sx, sy)
+    if cl_id is not None and callable(self.on_cl_click):
+      self.on_cl_click(cl_id)
 
   def _viewport_region(self):
     """Match pyqtgraph paint(): same tuple for region and projection viewport."""
@@ -632,9 +679,53 @@ class Scene3D(QWidget):
     except Exception:
       return None
 
+  def _pick_centerline(self, sx, sy):
+    """Return centerline display id closest (in screen pixels) to (sx, sy).
+
+    Projects each polyline vertex to screen space and measures the minimum
+    point-to-segment distance from the click to each polyline. The nearest
+    polyline wins if its distance is within :data:`CL_PICK_TOLERANCE_PX`.
+    """
+    if self.view is None or not self._cl_pick:
+      return None
+    m = np.array([float(sx), float(sy)], dtype=float)
+    best_id, best_d = None, float("inf")
+    for cl_id, pts in self._cl_pick:
+      if pts.shape[0] < 2:
+        continue
+      proj = np.full((pts.shape[0], 2), np.nan, dtype=float)
+      for k in range(pts.shape[0]):
+        p2 = self._project(pts[k])
+        if p2 is not None:
+          proj[k] = p2
+      a = proj[:-1]
+      b = proj[1:]
+      valid = np.isfinite(a).all(axis=1) & np.isfinite(b).all(axis=1)
+      if not np.any(valid):
+        continue
+      a = a[valid]
+      b = b[valid]
+      ab = b - a
+      ab_len2 = np.einsum("ij,ij->i", ab, ab)
+      safe = ab_len2 > 1e-12
+      t = np.zeros(a.shape[0], dtype=float)
+      t[safe] = np.clip(
+        np.einsum("ij,ij->i", (m - a[safe]), ab[safe]) / ab_len2[safe],
+        0.0,
+        1.0,
+      )
+      closest = a + t[:, None] * ab
+      d = np.linalg.norm(m - closest, axis=1).min()
+      if d < best_d:
+        best_d, best_id = float(d), cl_id
+    if best_id is not None and best_d <= CL_PICK_TOLERANCE_PX:
+      return best_id
+    return None
+
   def clear(self):
     """Remove all GL drawables (no axis triad at the origin)."""
     self._bif_pick = []
+    self._cl_pick = []
     self.mesh_simplified = False
     if self.view is None:
       return
@@ -678,21 +769,50 @@ class Scene3D(QWidget):
         self._line(np.vstack([p0, p1]), color, 1.0, **line_kw)
       x += 1.25
 
-  def draw_centerlines(self, centerlines):
-    """``centerlines``: iterable of ``(id, (n,3) ndarray)`` polylines."""
+  def draw_centerlines(self, centerlines, selected_id=None, preserve_camera=False):
+    """Render centerline polylines; optionally highlight one.
+
+    Parameters
+    ----------
+    centerlines : iterable of ``(id, (n,3) ndarray)``
+      Polylines with their display id (same id shown in the ID-map panel).
+    selected_id : int or None
+      If given, the matching polyline is drawn thicker in black so list- and
+      3D-driven selections stay visually in sync.
+    preserve_camera : bool
+      If True, keep the current camera pose (used when re-rendering on
+      selection changes so the view does not jump).
+    """
     self.clear()
     if self.view is None:
       return
+    centerlines = list(centerlines)
     all_pts = []
+    # Base pass: one colored line per centerline + pick record (hit-testing).
     for idx, pts in centerlines:
       if pts.shape[0] < 2:
         continue
       c = QColor.fromHsv((idx * 37) % 360, 220, 220)
       self._line(pts, (c.redF(), c.greenF(), c.blueF(), 1.0), 1.2)
+      self._cl_pick.append((int(idx), np.asarray(pts, dtype=float)))
       all_pts.append(pts)
     if not all_pts:
       return
-    s = self._fit(np.concatenate(all_pts, axis=0))
+    all_pts_arr = np.concatenate(all_pts, axis=0)
+    if preserve_camera:
+      mins, maxs = all_pts_arr.min(axis=0), all_pts_arr.max(axis=0)
+      r = max(1e-3, 0.5 * np.max(maxs - mins))
+      s = 0.016 * r
+    else:
+      s = self._fit(all_pts_arr)
+    # Overlay: thick black line for the selected centerline (drawn last so it
+    # wins the depth test against its colored base line).
+    if selected_id is not None:
+      for idx, pts in centerlines:
+        if int(idx) != int(selected_id) or pts.shape[0] < 2:
+          continue
+        self._line(pts, (0.04, 0.04, 0.04, 1.0), 3.0, glOptions="opaque")
+        break
     for idx, pts in centerlines:
       if pts.shape[0] < 2:
         continue
@@ -780,12 +900,13 @@ class Scene3D(QWidget):
         line_gl_kw=_bif_gl,
       )
 
-  def draw_mesh(self, mesh, preview_points=None, boundary_wire=None, boundary_scatter=None):
-    """Draw **full** boundary wireframe + boundary vertices; fallback to point cloud.
+  def draw_mesh(self, mesh, preview_points=None, boundary_wire=None,
+                boundary_scatter=None, boundary_faces=None):
+    """Draw the boundary as a blue **filled surface** with its wireframe + vertices.
 
-    Cached ``boundary_wire`` / ``boundary_scatter`` from the worker avoid recomputing
-    ``mesh.boundary`` on the GUI thread. Sets ``self.mesh_simplified`` if fallback
-    subsampling is used.
+    Cached ``boundary_wire`` / ``boundary_scatter`` / ``boundary_faces`` from the
+    worker avoid recomputing ``mesh.boundary`` on the GUI thread. Sets
+    ``self.mesh_simplified`` if only the point-cloud fallback could be rendered.
     """
     self.clear()
     if self.view is None:
@@ -793,22 +914,51 @@ class Scene3D(QWidget):
     self.mesh_simplified = False
     wpos = boundary_wire
     scat = boundary_scatter
-    if wpos is None and scat is None:
-      wpos, scat = _boundary_preview_arrays(mesh)
+    tris = boundary_faces
+    if wpos is None and scat is None and tris is None:
+      wpos, scat, tris = _boundary_preview_arrays(mesh)
     drew = False
     fit_pts = []
-    # Saturated blue: strong contrast on white GL background.
-    mesh_rgb = (0.02, 0.38, 0.95, 1.0)
-    mesh_rgb_a = (0.02, 0.38, 0.95, 0.95)
+    # Flat-gray faces with saturated-blue edges and vertices: the lack of
+    # shading keeps every element the same tone (no face-by-face "darker blue"
+    # artefacts from per-face lighting) and the blue wireframe reads clearly.
+    face_rgba = (0.75, 0.75, 0.75, 1.0)
+    edge_rgba = (0.02, 0.38, 0.95, 1.0)
+    vert_rgba = (0.02, 0.38, 0.95, 1.0)
+    # Blue filled boundary surface.
+    if tris is not None and scat is not None and len(tris) > 0 and len(scat) > 0:
+      verts = np.ascontiguousarray(np.asarray(scat, dtype=float))
+      faces = np.ascontiguousarray(np.asarray(tris, dtype=np.int64))
+      face_colors = np.tile(np.asarray(face_rgba, dtype=float), (faces.shape[0], 1))
+      try:
+        mesh_item = gl.GLMeshItem(
+          vertexes=verts,
+          faces=faces,
+          faceColors=face_colors,
+          smooth=False,
+          drawEdges=False,
+          drawFaces=True,
+          shader=None,
+          glOptions="opaque",
+        )
+        # Render faces first so lines drawn next win the z-fight on top.
+        mesh_item.setDepthValue(-1)
+        self.view.addItem(mesh_item)
+        self.items.append(mesh_item)
+        fit_pts.append(verts)
+        drew = True
+      except Exception:
+        pass
     if wpos is not None and len(wpos) > 0:
       ln = gl.GLLinePlotItem(
         pos=wpos,
-        color=mesh_rgb,
-        width=1.1,
+        color=edge_rgba,
+        width=2.5,
         antialias=True,
         mode="lines",
         glOptions="opaque",
       )
+      ln.setDepthValue(10)
       self.view.addItem(ln)
       self.items.append(ln)
       fit_pts.append(wpos)
@@ -816,10 +966,11 @@ class Scene3D(QWidget):
     if scat is not None and len(scat) > 0:
       s = gl.GLScatterPlotItem(
         pos=np.asarray(scat, dtype=float),
-        color=mesh_rgb_a,
+        color=vert_rgba,
         size=3.0,
         glOptions="opaque",
       )
+      s.setDepthValue(11)
       self.view.addItem(s)
       self.items.append(s)
       fit_pts.append(np.asarray(scat, dtype=float))
@@ -862,10 +1013,12 @@ class MeshGeneratorWindow(QMainWindow):
     self._mesh_preview_points = None
     self._mesh_preview_boundary_wire = None
     self._mesh_preview_boundary_scatter = None
+    self._mesh_preview_boundary_faces = None
     self._mesh_stats = None
     self._mesh_thread = None
     self.last_mesh_path = ""
     self._selected_bif_key = None
+    self._selected_centerline_id = None
     self._removed_bif_keys = set()
     self._removed_centerline_ids = set()
     self._manual_additions = []
@@ -943,11 +1096,16 @@ class MeshGeneratorWindow(QMainWindow):
     right_layout.addWidget(header)
     self.scene = Scene3D(right)
     self.scene.on_bif_click = self._on_bif_clicked_3d
+    self.scene.on_cl_click = self._on_cl_clicked_3d
     right_layout.addWidget(self.scene, stretch=4)
     id_map_hdr = QLabel("Centerline ID map")
-    id_map_hdr.setToolTip("Select a row, then use Delete Selected Centerline below.")
+    id_map_hdr.setToolTip(
+      "Select a row to highlight that centerline in 3D; click a centerline "
+      "in 3D to select its row. Use Delete Selected Centerline below."
+    )
     right_layout.addWidget(id_map_hdr)
     self.id_map = QListWidget()
+    self.id_map.currentItemChanged.connect(self._on_id_map_item_changed)
     right_layout.addWidget(self.id_map, stretch=1)
     cl_btn_row = QHBoxLayout()
     b_cl_del = QPushButton("Delete Selected Centerline")
@@ -1044,6 +1202,7 @@ class MeshGeneratorWindow(QMainWindow):
     self._mesh_preview_points = None
     self._mesh_preview_boundary_wire = None
     self._mesh_preview_boundary_scatter = None
+    self._mesh_preview_boundary_faces = None
     self._set_mesh_stats(None)
 
   # --- QWidget groups (left panel) -------------------------------------------
@@ -1211,6 +1370,7 @@ class MeshGeneratorWindow(QMainWindow):
     self._removed_centerline_ids = set()
     self._manual_additions = []
     self._selected_bif_key = None
+    self._selected_centerline_id = None
     self._clear_cached_mesh()
     self._refresh()
 
@@ -1334,6 +1494,48 @@ class MeshGeneratorWindow(QMainWindow):
     self._set_status("3D click detected. Selecting nearest bifurcation...")
     self._select_bif_item_by_key(key)
 
+  def _select_centerline_by_id(self, cl_id, focus_scene=True):
+    """Sync UI state to ``cl_id`` (display id): scroll the ID map and re-render.
+
+    Used by both 3D picking and list selection; the scene is only redrawn when
+    centerlines are currently visible (avoids fighting the Bifurcations/Mesh
+    views).
+    """
+    if cl_id is None:
+      return
+    cl_id = int(cl_id)
+    self._selected_centerline_id = cl_id
+    # Move the ID-map cursor to the corresponding row without re-entering this
+    # slot; rows are 0-based but display ids are 1-based.
+    target_row = cl_id - 1
+    if 0 <= target_row < self.id_map.count():
+      self.id_map.blockSignals(True)
+      self.id_map.setCurrentRow(target_row)
+      self.id_map.blockSignals(False)
+    if focus_scene and self.mode.currentText() == "Centerlines":
+      self._render_mode(preserve_camera=True)
+
+  def _on_cl_clicked_3d(self, cl_id):
+    """3D viewport click on a centerline polyline → select it in the ID map."""
+    self._set_status(f"3D click detected. Selecting centerline {int(cl_id)}.")
+    self._select_centerline_by_id(cl_id, focus_scene=True)
+
+  def _on_id_map_item_changed(self, current, _prev):
+    """ID-map row change → highlight that centerline in 3D (Centerlines mode)."""
+    if current is None:
+      return
+    if self.mode.currentText() != "Centerlines":
+      return
+    disp = current.data(Qt.ItemDataRole.UserRole + 1)
+    if disp is None:
+      return
+    self._selected_centerline_id = int(disp)
+    self.scene.draw_centerlines(
+      self._centerlines,
+      selected_id=self._selected_centerline_id,
+      preserve_camera=True,
+    )
+
   def _on_bif_selected_list(self, current, _prev):
     self._selected_bif_key = None if current is None else current.data(Qt.ItemDataRole.UserRole)
     if self.mode.currentText() != "Bifurcations":
@@ -1378,6 +1580,7 @@ class MeshGeneratorWindow(QMainWindow):
     self._removed_bif_keys = set()
     self._manual_additions = []
     self._selected_bif_key = None
+    self._selected_centerline_id = None
     self._clear_cached_mesh()
     self._refresh()
     self._set_status(
@@ -1389,6 +1592,7 @@ class MeshGeneratorWindow(QMainWindow):
       self._set_status("No removed centerlines to restore.")
       return
     self._removed_centerline_ids = set()
+    self._selected_centerline_id = None
     self._clear_cached_mesh()
     self._refresh()
     self._set_status("Removed centerlines restored.")
@@ -1447,6 +1651,7 @@ class MeshGeneratorWindow(QMainWindow):
         self._mesh_preview_points,
         self._mesh_preview_boundary_wire,
         self._mesh_preview_boundary_scatter,
+        self._mesh_preview_boundary_faces,
       )
       if self.scene.mesh_simplified:
         self._set_status("Mesh preview: boundary point cloud only (subsampled); statistics in the Mesh panel.")
@@ -1464,11 +1669,29 @@ class MeshGeneratorWindow(QMainWindow):
         "List selection shows a large black centroid; unselected furcs are red."
       )
       return
-    self.scene.draw_centerlines(self._centerlines)
+    # Keep the selected centerline id only if it still exists after edits.
+    valid_ids = {int(disp) for disp, _ in self._centerlines}
+    if self._selected_centerline_id not in valid_ids:
+      self._selected_centerline_id = None
+    self.scene.draw_centerlines(
+      self._centerlines,
+      selected_id=self._selected_centerline_id,
+      preserve_camera=preserve_camera,
+    )
+    # Stash the display id on each map row (UserRole+1) so we can look them up
+    # for 3D-driven selections; UserRole keeps the original file id used by
+    # delete/reset-centerline flows.
+    self.id_map.blockSignals(True)
     for disp, (orig_i, name) in enumerate(self._filenames, start=1):
       it = QListWidgetItem(f"{disp} → {name}")
       it.setData(Qt.ItemDataRole.UserRole, orig_i)
+      it.setData(Qt.ItemDataRole.UserRole + 1, int(disp))
       self.id_map.addItem(it)
+    if self._selected_centerline_id is not None:
+      row = int(self._selected_centerline_id) - 1
+      if 0 <= row < self.id_map.count():
+        self.id_map.setCurrentRow(row)
+    self.id_map.blockSignals(False)
     self._set_status(f"Centerline view loaded: {len(self._centerlines)} lines.")
 
   def _generate_export_open(self):
@@ -1507,8 +1730,8 @@ class MeshGeneratorWindow(QMainWindow):
       mesh = generate_mesh(**kw)
       bpts = _extract_boundary_points_for_preview(mesh)
       stats = mesh_statistics(mesh)
-      bwire, bscatter = _boundary_preview_arrays(mesh)
-      return mesh, bpts, stats, bwire, bscatter
+      bwire, bscatter, bfaces = _boundary_preview_arrays(mesh)
+      return mesh, bpts, stats, bwire, bscatter, bfaces
 
     self.b_gen.setEnabled(False)
     self.b_stop_gen.setEnabled(True)
@@ -1521,11 +1744,12 @@ class MeshGeneratorWindow(QMainWindow):
     th.finished.connect(self._on_mesh_thread_finished)
     th.start()
 
-  def _on_mesh_thread_ok(self, mesh, bpts, stats, bwire, bscatter):
+  def _on_mesh_thread_ok(self, mesh, bpts, stats, bwire, bscatter, bfaces):
     self.last_mesh = mesh
     self._mesh_preview_points = bpts
     self._mesh_preview_boundary_wire = bwire
     self._mesh_preview_boundary_scatter = bscatter
+    self._mesh_preview_boundary_faces = bfaces
     self._set_mesh_stats(stats)
     if self.mode.currentText() != "Mesh":
       self.mode.blockSignals(True)

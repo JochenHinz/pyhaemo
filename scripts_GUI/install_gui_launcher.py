@@ -9,7 +9,7 @@ This creates:
   ~/.local/share/applications/pyhaemo-mesh-generator.desktop
 
 The launcher points to:
-  <repo>/partery/gui_compact.py
+  <repo>/partery/gui.py
 and uses icon:
   <repo>/assets/logo/pictogram.png (fallbacks included)
 """
@@ -136,7 +136,7 @@ def main() -> int:
   args = parser.parse_args()
 
   repo_root = _repo_root()
-  gui_script = repo_root / "partery" / "gui_compact.py"
+  gui_script = repo_root / "partery" / "gui.py"
   if not gui_script.is_file():
     raise FileNotFoundError(f"Cannot find GUI script: {gui_script}")
 

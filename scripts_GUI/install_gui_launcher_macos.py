@@ -5,7 +5,7 @@ Creates:
   ~/Applications/PyHaemo Mesh Generator.app
 
 This launcher runs:
-  <repo>/partery/gui_compact.py
+  <repo>/partery/gui.py
 using the selected Python interpreter.
 """
 
@@ -97,7 +97,7 @@ def main() -> int:
     return 1
 
   repo_root = _repo_root()
-  gui_script = repo_root / "partery" / "gui_compact.py"
+  gui_script = repo_root / "partery" / "gui.py"
   if not gui_script.is_file():
     raise FileNotFoundError(f"Cannot find GUI script: {gui_script}")
 
