@@ -38,3 +38,68 @@ comprehensive module supporting various boolean mesh operations
 - Various spline interpolation techniques (linear, cubic-Hermite, ...)
 - The library provides an interface to the [Nutils](https://github.com/evalf/nutils/tree/main) finite element library
 which supports variational techniques based on isogeometric analysis
+
+## Installation
+
+`pyhaemo` is a PEP 621 project built with [flit](https://flit.pypa.io/). From the
+repository root (where `pyproject.toml` lives):
+
+### Core library
+
+```bash
+pip install .
+```
+
+Pulls in the scientific stack used by the core package:
+`numpy`, `scipy`, `nutils`, `treelog`, `numba`, `matplotlib`, `vtk`,
+`pyvista`, `pygmsh`, `networkx`.
+
+### Core library + GUI
+
+The interactive mesh generator under `partery/` (launched by the scripts in
+`scripts_GUI/`) additionally needs `PyQt6` and `jax`.  Install them together
+with the core library through the **`gui`** extra:
+
+```bash
+pip install '.[gui]'
+```
+
+The convenience alias **`all`** currently pulls the same set:
+
+```bash
+pip install '.[all]'
+```
+
+### Editable / development install
+
+```bash
+pip install -e '.[gui]'
+```
+
+### Running the test suite
+
+```bash
+python -m unittest discover -s test -v
+```
+
+## GUI launcher install (Linux / macOS)
+
+### Linux
+
+```bash
+./scripts/install_gui_launcher.sh
+```
+
+This writes:
+- `~/.local/share/applications/pyhaemo-mesh-generator.desktop`
+
+### macOS
+
+```bash
+./scripts/install_gui_launcher_macos.sh
+```
+
+This creates:
+- `~/Applications/PyHaemo Mesh Generator.app`
+
+Then launch **PyHaemo Mesh Generator** from the app menu/Applications and pin it to the dock.

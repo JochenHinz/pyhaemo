@@ -207,7 +207,8 @@ def hermite_nonconstant_tangent(unitdisc: NDSplineArray,
 @lru_cache
 def repeated_knot_disc(nelems: Int,
                        degree: Int = 3,
-                       reparam: bool = True) -> NDSplineArray:
+                       reparam: bool = True,
+                       boundary_layer_exponent: Float = 1.) -> NDSplineArray:
   """
   Has a repeated knot at x = 0.5 for kv0 and kv1.
   """
@@ -218,7 +219,8 @@ def repeated_knot_disc(nelems: Int,
 
   kv2 = UnivariateKnotVector(np.linspace(0, 1, nelems+1), degree=degree)
 
-  return ellipse(1, 1, kv0, kv1, kv2, reparam=reparam)
+  return ellipse(1, 1, kv0, kv1, kv2, reparam=reparam,
+                 boundary_layer_exponent=boundary_layer_exponent)
 
 
 WingData = namedtuple('WingData', ['ax', 'xC', 'xL',

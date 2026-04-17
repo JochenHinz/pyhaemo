@@ -151,7 +151,7 @@ def _compute_kdtree(mesh: 'Mesh'):
 
 
 @lru_cache(maxsize=8)
-def compute_distance_matrix(mesh0: 'Mesh', mesh1: 'Mesh', eps: float = 1e-6):
+def compute_distance_matrix(mesh0: 'Mesh', mesh1: 'Mesh', eps: float = 1e-8):
   """
   Compute the distance matrix between two meshes.
   """
@@ -190,7 +190,7 @@ def match_active(mesh0: 'Mesh', mesh1: 'Mesh', eps: float = 1e-8) -> IntArray:
                    axis=1)
 
 
-def mesh_union(*meshes: 'Mesh', eps: float = 1e-6,
+def mesh_union(*meshes: 'Mesh', eps: float = 1e-8,
                                 return_matches: bool = False,
                                 boundary: bool = False):
   """

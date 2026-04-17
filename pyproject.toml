@@ -7,16 +7,33 @@ authors = [
 ]
 requires-python = '>=3.12'
 dependencies = [
-    "numpy >=1.26.4, <2", 
+    "numpy >=1.26.4, <2",
     "scipy >=1.12.0, <2",
     "nutils >=8.8, <9",
+    "treelog >=1.0, <2",
     "numba >=0.60.0, <1",
+    "matplotlib >=3.8.0, <4",
     "vtk >=9.3.1, <10",
     "pyvista >=0.45.2, <1",
     "pygmsh >=7.1.17, <8",
     "networkx >=3.4.2, <4"
 ]
 dynamic = ["description", "version"]
+
+[project.optional-dependencies]
+# Extras required by the interactive mesh generator GUI under `partery/`
+# (launched via scripts_GUI/install_gui_launcher.py). Install with:
+#   pip install .[gui]
+gui = [
+    "PyQt6 >=6.6, <7",
+    "jax >=0.4.30, <1",
+]
+# Convenience alias to install everything in one go:
+#   pip install .[all]
+all = [
+    "PyQt6 >=6.6, <7",
+    "jax >=0.4.30, <1",
+]
 
 [tool.mypy]
 ignore_missing_imports = true

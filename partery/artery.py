@@ -54,19 +54,25 @@ class VascularGraph(EdgeGraph):
                             for cline, rad in zip(centerlines, radii, strict=True) ])
 
   @classmethod
-  def from_csv(cls, foldername: str):
+  def from_csv(cls, foldername: str, skip_indices: set[Int] | None = None):
     """
     Create a vascular graph from CSV files in the specified folder.
+
+    Files are read in **sorted** name order (stable edge indices 1 … N matching
+    the GUI ID map). ``skip_indices`` holds 1-based indices in that enumeration
+    to omit (deleted centerlines in the mesh generator).
     """
-
-    filenames = (os.path.join(foldername, f)
-                 for f in os.listdir(foldername) if f.endswith('.csv'))
-
+    skip = frozenset(skip_indices or ())
+    names = sorted(f for f in os.listdir(foldername) if f.lower().endswith(".csv"))
     edges = []
-    for data in map(lambda fn: np.genfromtxt(fn, delimiter=',', skip_header=1), filenames):
+    for i, f in enumerate(names, start=1):
+      if i in skip:
+        continue
+      path = os.path.join(foldername, f)
+      data = np.genfromtxt(path, delimiter=",", skip_header=1)
       edges.append(data)
 
-    assert edges
+    assert edges, "No CSV centerlines left after applying skip_indices."
 
     return cls.from_edges(edges)
 
@@ -270,19 +276,17 @@ class VascularGraph(EdgeGraph):
 
     for furc in self.furcations:
       center = furc.centroid
-      # centerpoint_radius = np.mean([radii[i] for i in furc.indices])
 
       for i in furc:
         mypoint = endpoints[i]
         if np.linalg.norm(mypoint - center) < eps:
           continue
 
-        centerpoint_radius = radii[i]
-
         edge = edgedict[abs(i)]
+        rad = radii[i]
 
         # reverse the order if i > 0 to append at the end
-        points = ([[*center, centerpoint_radius]], edge.points)[SL if i < 0 else RSL]
+        points = ([[*center, rad]], edge.points)[SL if i < 0 else RSL]
         edge = edge.__class__(points=np.concatenate(points, axis=0))
         edgedict[abs(i)] = edge
 
@@ -318,24 +322,8 @@ class VascularGraph(EdgeGraph):
                        self.furcations)
 
 
-def prepare_graph(graph: VascularGraph):
-  return graph.normalize() \
-              .refit() \
-              .split_edges_proximity(eps=0.06) \
-              .merge_furcs_proximity(0.07) \
-              .refit() \
-              .recompute_centroids() \
-              .orient_nontrivial() \
-              .align_nontrivial_normals() \
-              .orient_trivial() \
-              .rtruncate(1) \
-              .furcomplete(npoints=1001) \
-              .delete_twofurcations() \
-              .align_frames()
-
-
 if __name__ == '__main__':
-  artery = VascularGraph.from_csv('data/csv/brain') \
+  artery = VascularGraph.from_csv('data/csv/coro') \
                         .normalize() \
                         .refit()
 
