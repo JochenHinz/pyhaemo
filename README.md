@@ -1,7 +1,7 @@
-![SpliCo Logo](assets/logo/logo.png)
+![SpliCo Logo](assets/logo/pictogram.png)
 
 
-The SpliCo library for spline-based geometric modeling.
+The PyHaemo library for spline-based geometric modeling.
 
 The library's most important object is the `NDSplineArray` class, which
 supports spline arithmetic using the default `NumPy` syntax.
