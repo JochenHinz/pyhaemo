@@ -2,6 +2,12 @@
 
 Loads centerline CSVs, builds a :class:`~artery.VascularGraph`, and offers:
   - 3D centerline and bifurcation views (pyqtgraph OpenGL, no embedded VTK)
+  - **Fix bifurcation** view after meshing: optional mesh + **bif-view** vessel
+    polylines; full branch-anchor picks are applied on **Generate mesh** (trim
+    incident edges at picked points before the normal mesh pipeline).  Every
+    junction with a **complete** set of picks stays in the queue across mesh
+    runs so you can fix one bifurcation, generate, then fix another without
+    losing earlier trims (until you clear anchors or invalidate the graph cache).
   - Bifurcation editing (delete / manual merge by signed edge IDs) with 3D picking
   - Background mesh generation (QThread) and full **boundary** wireframe preview
   - Volume mesh statistics, Gmsh ``.msh`` export, and validity check
@@ -73,6 +79,9 @@ SEL_BIF_BLACK_SIZE_PX = 26.0
 # a centerline click. Looser than the bifurcation threshold because polylines
 # are thin and the user aims for a line, not a marker.
 CL_PICK_TOLERANCE_PX = 10.0
+
+# Fallback boundary preview point cloud (matches blue wire/vert accent in ``draw_mesh``).
+MESH_FALLBACK_SCATTER_RGBA = (0.02, 0.38, 0.95, 1.0)
 
 # --- Mesh preview fallback (subsampled points if boundary wireframe unavailable)
 MAX_MESH_PREVIEW_POINTS = 30000
@@ -386,17 +395,155 @@ def build_graph(csv_folder, split_eps, merge_eps, use_merge, removed_keys, manua
   return g
 
 
-def generate_mesh(csv_folder, split_eps, merge_eps, use_merge, spline_points, mesh_dx, mesh_nref, mesh_rfac,
+def _trim_vascular_edge_at_anchor(edge, signed_branch: int, anchor_xyz: np.ndarray):
+  """Move the bif-attached endpoint of ``edge`` to the polyline point closest to ``anchor_xyz``.
+
+  Positive ``signed_branch`` means the bifurcation meets the edge at ``points[-1]``;
+  negative means it meets at ``points[0]``.
+  """
+  pts = np.asarray(edge.points, dtype=float)
+  n = int(pts.shape[0])
+  if n < 2 or pts.shape[1] < 4:
+    return edge
+  p3 = pts[:, :3]
+  a = np.asarray(anchor_xyz, dtype=float).ravel()[:3]
+  best_seg, best_t, best_d = 0, 0.0, float("inf")
+  for i in range(n - 1):
+    p0, p1 = p3[i], p3[i + 1]
+    d = p1 - p0
+    denom = float(np.dot(d, d))
+    if denom < 1e-18:
+      continue
+    t = float(np.clip(np.dot(a - p0, d) / denom, 0.0, 1.0))
+    q = p0 + t * d
+    dist = float(np.linalg.norm(q - a))
+    if dist < best_d:
+      best_d, best_seg, best_t = dist, i, t
+  seg, t = best_seg, best_t
+  r0, r1 = float(pts[seg, 3]), float(pts[seg + 1, 3])
+  q3 = p3[seg] + t * (p3[seg + 1] - p3[seg])
+  q4 = np.array([q3[0], q3[1], q3[2], (1.0 - t) * r0 + t * r1], dtype=float)
+  if signed_branch > 0:
+    new_pts = np.vstack([pts[: seg + 1], q4.reshape(1, 4)])
+  else:
+    new_pts = np.vstack([q4.reshape(1, 4), pts[seg + 1 :]])
+  try:
+    out = edge._edit(points=new_pts, frame=None).remove_duplicates(thresh=1e-9)
+  except Exception:
+    return edge
+  if out.npoints < 2:
+    return edge
+  return out
+
+
+def apply_fix_branch_anchors_to_vgraph(vgraph, bif_key: frozenset, anchors: dict[int, np.ndarray]):
+  """Trim each incident edge so bif endpoints coincide with user-picked locations."""
+  if not anchors or not bif_key:
+    return vgraph
+  furc = None
+  key_set = frozenset(int(i) for i in bif_key)
+  for f in vgraph.nontrivial_furcations:
+    if frozenset(int(i) for i in f.indices) == key_set:
+      furc = f
+      break
+  if furc is None:
+    return vgraph
+  need = {abs(int(s)) for s in furc.indices}
+  if set(int(k) for k in anchors.keys()) != need:
+    return vgraph
+  edge_sign = {abs(int(s)): int(s) for s in furc.indices}
+  new_edges = []
+  for i, e in zip(vgraph.indices, vgraph.edges):
+    iabs = int(i)
+    if iabs in anchors and iabs in edge_sign:
+      new_edges.append(_trim_vascular_edge_at_anchor(e, edge_sign[iabs], anchors[iabs]))
+    else:
+      new_edges.append(e)
+  return vgraph._edit(edges=new_edges).recompute_centroids()
+
+
+def generate_mesh(csv_folder, split_eps, merge_eps, use_merge, mesh_dx, mesh_nref, mesh_rfac,
                   mesh_section_points, removed_keys, manual_additions,
                   boundary_layer_exponent=1.0,
                   mesh_union_eps=1e-8, bif_exploit_symmetry=False,
-                  removed_centerline_ids=frozenset()):
-  """Run the full artery pipeline and return the volumetric hex mesh (CPU-heavy)."""
+                  removed_centerline_ids=frozenset(),
+                  merge_opt_in=(),
+                  fix_anchor_bif_key=None,
+                  fix_branch_anchors=None,
+                  fix_anchor_specs=()):
+  """Run the full artery pipeline and return the volumetric hex mesh (CPU-heavy).
+
+  ``merge_opt_in`` is an iterable of "component specs"; each spec is itself
+  an iterable of bif-keys where a bif-key is an iterable of unsigned edge
+  ids.  Every listed component is collapsed into a single n-furcation at
+  the :class:`VascularGraph` level — **before** ``align_nontrivial_normals``
+  and ``align_frames`` run — so the merged n-furcation goes through the
+  identical normal-alignment / frame-rebuild pipeline as any naturally
+  occurring n-furcation.  This is what keeps
+  :func:`bif.bif_from_matrices`'s CCW wing-stitching consistent for merged
+  bifs: the endpoint frames it reads on the :class:`SplineGraph` side are
+  indistinguishable (up to polyline-vs-spline tangent fit residual) from
+  those of natural bifs.
+
+  Centerline B-splines use ``mesh_dx`` via :meth:`artery.VascularGraph.to_spline_graph`
+  (``dx=mesh_dx``): each edge gets ``max(2, int(length / mesh_dx))`` knot
+  intervals, matching the longitudinal sampling of the volumetric mesh.
+
+  ``fix_anchor_bif_key`` / ``fix_branch_anchors`` (optional): legacy single-bif
+  form; same trimming as one entry of ``fix_anchor_specs``.
+
+  ``fix_anchor_specs`` (optional): iterable of ``(bif_key_frozenset, anchors_dict)``
+  for multiple junctions; each ``anchors_dict`` maps unsigned edge id → 3D point.
+  Every complete spec is applied in sorted edge-id order. When **any** spec is
+  applied, ``rfac_retry=False`` for the whole mesh run (see above).
+
+  GUI **Fix bifurcation** stores one spec per bif in ``fix_anchor_specs``.
+
+  When any fix-anchor trimming runs (``fix_anchor_specs`` or the legacy single-bif
+  kwargs), the downstream :meth:`SplineGraph.make_mesh` call uses
+  ``rfac_retry=False`` for that entire run.
+  """
+  from mesh import apply_merge_opt_in_vgraph
   artery = build_graph(
     csv_folder, split_eps, merge_eps, use_merge, removed_keys, manual_additions,
     removed_centerline_ids=removed_centerline_ids,
   )
   artery = artery.orient_nontrivial()
+  # Apply opt-in merges on the VascularGraph, *before* normal / frame
+  # alignment.  ``merged_key_to_members`` maps the merged n-furcation's
+  # own bif-key back to the frozenset of constituent bif-keys it absorbed
+  # — :func:`make_spline_mesh` uses it to back-fill validity/repair info
+  # onto those member bif-keys (for diagnostics); the GUI list/3D bif view
+  # show the merged n-furcation row instead of the absorbed ones.
+  artery, merged_key_to_members = apply_merge_opt_in_vgraph(
+    artery, merge_opt_in,
+  )
+  fix_anchors_applied = False
+  if fix_anchor_specs:
+    for _fk_raw, adict in sorted(
+      fix_anchor_specs,
+      key=lambda sp: tuple(sorted(abs(int(x)) for x in sp[0])),
+    ):
+      fk = frozenset(int(i) for i in _fk_raw)
+      need = {abs(int(x)) for x in fk}
+      if need != {int(k) for k in adict.keys()}:
+        continue
+      anchors = {
+        int(k): np.asarray(v, dtype=float).reshape(3)
+        for k, v in adict.items()
+      }
+      artery = apply_fix_branch_anchors_to_vgraph(artery, fk, anchors)
+      fix_anchors_applied = True
+  elif fix_branch_anchors and fix_anchor_bif_key is not None:
+    fk = frozenset(int(i) for i in fix_anchor_bif_key)
+    need = {abs(int(x)) for x in fk}
+    if need == {int(k) for k in fix_branch_anchors.keys()}:
+      anchors = {
+        int(k): np.asarray(v, dtype=float).reshape(3)
+        for k, v in fix_branch_anchors.items()
+      }
+      artery = apply_fix_branch_anchors_to_vgraph(artery, fk, anchors)
+      fix_anchors_applied = True
   artery = (
     artery.align_nontrivial_normals()
     .orient_trivial()
@@ -405,10 +552,15 @@ def generate_mesh(csv_folder, split_eps, merge_eps, use_merge, spline_points, me
     .delete_twofurcations()
     .align_frames()
   )
-  return artery.to_spline_graph(spline_points).make_mesh(
+  # Spline knot density along each vessel matches volumetric ``mesh_dx``:
+  # ``max(2, int(edge.length / mesh_dx))`` per edge (see ``to_spline_graph``).
+  return artery.to_spline_graph(dx=mesh_dx).make_mesh(
     dx=mesh_dx, nref=mesh_nref, rfac=mesh_rfac, cross_nelems=mesh_section_points,
     union_eps=mesh_union_eps, bif_exploit_symmetry=bif_exploit_symmetry,
-    boundary_layer_exponent=boundary_layer_exponent)
+    boundary_layer_exponent=boundary_layer_exponent,
+    merged_key_to_members=merged_key_to_members,
+    rfac_retry=not fix_anchors_applied,
+  )
 
 
 def _extract_boundary_points_for_preview(mesh):
@@ -447,10 +599,11 @@ class MeshComputeThread(QThread):
   """Runs ``work_fn`` off the GUI thread; results are delivered via Qt signals.
 
   ``finished_ok`` payloads:
-    ``(mesh, aux_points, stats, boundary_wire, boundary_scatter, boundary_faces)``.
+    ``(mesh, aux_points, stats, boundary_wire, boundary_scatter,
+       boundary_faces, bif_validity, merge_components)``.
   """
 
-  finished_ok = pyqtSignal(object, object, object, object, object, object)
+  finished_ok = pyqtSignal(object, object, object, object, object, object, object, object)
   finished_err = pyqtSignal(str)
 
   def __init__(self, work_fn):
@@ -459,8 +612,17 @@ class MeshComputeThread(QThread):
 
   def run(self):
     try:
-      mesh, bpts, stats, bwire, bscatter, bfaces = self._work_fn()
-      self.finished_ok.emit(mesh, bpts, stats, bwire, bscatter, bfaces)
+      result = self._work_fn()
+      # Tolerate both old 7-tuple and new 8-tuple layouts so an in-flight
+      # worker from a previous build doesn't crash after a hot reload.
+      if len(result) == 8:
+        mesh, bpts, stats, bwire, bscatter, bfaces, bvalid, mcomp = result
+      else:
+        mesh, bpts, stats, bwire, bscatter, bfaces, bvalid = result
+        mcomp = ()
+      self.finished_ok.emit(
+        mesh, bpts, stats, bwire, bscatter, bfaces, bvalid, mcomp,
+      )
     except BaseException:
       self.finished_err.emit(traceback.format_exc())
 
@@ -484,6 +646,7 @@ class Scene3D(QWidget):
     super().__init__(parent)
     self.on_bif_click = None
     self.on_cl_click = None
+    self.on_cl_click_detail = None
     self.mesh_simplified = False
     self._bif_pick = []
     self._cl_pick = []
@@ -503,6 +666,12 @@ class Scene3D(QWidget):
     self.items = []
 
   def _handle_left_click(self, sx, sy):
+    # Fix-bifurcation mode: only polyline picks (no bif markers drawn).
+    if callable(self.on_cl_click_detail):
+      det = self._pick_centerline_detail(sx, sy)
+      if det is not None:
+        self.on_cl_click_detail(int(det[0]), det[1])
+      return
     # Bifurcation markers are small; try them first (they beat the looser
     # centerline tolerance at close range).
     key = self._pick_bif(sx, sy)
@@ -679,17 +848,12 @@ class Scene3D(QWidget):
     except Exception:
       return None
 
-  def _pick_centerline(self, sx, sy):
-    """Return centerline display id closest (in screen pixels) to (sx, sy).
-
-    Projects each polyline vertex to screen space and measures the minimum
-    point-to-segment distance from the click to each polyline. The nearest
-    polyline wins if its distance is within :data:`CL_PICK_TOLERANCE_PX`.
-    """
+  def _pick_centerline_detail(self, sx, sy):
+    """Return ``(display_cl_id, world_xyz)`` for the closest polyline segment, or None."""
     if self.view is None or not self._cl_pick:
       return None
     m = np.array([float(sx), float(sy)], dtype=float)
-    best_id, best_d = None, float("inf")
+    best_id, best_d, best_xyz = None, float("inf"), None
     for cl_id, pts in self._cl_pick:
       if pts.shape[0] < 2:
         continue
@@ -700,11 +864,15 @@ class Scene3D(QWidget):
           proj[k] = p2
       a = proj[:-1]
       b = proj[1:]
+      p3a = np.asarray(pts[:-1], dtype=float)
+      p3b = np.asarray(pts[1:], dtype=float)
       valid = np.isfinite(a).all(axis=1) & np.isfinite(b).all(axis=1)
       if not np.any(valid):
         continue
       a = a[valid]
       b = b[valid]
+      p3a = p3a[valid]
+      p3b = p3b[valid]
       ab = b - a
       ab_len2 = np.einsum("ij,ij->i", ab, ab)
       safe = ab_len2 > 1e-12
@@ -715,12 +883,27 @@ class Scene3D(QWidget):
         1.0,
       )
       closest = a + t[:, None] * ab
-      d = np.linalg.norm(m - closest, axis=1).min()
-      if d < best_d:
-        best_d, best_id = float(d), cl_id
+      d = np.linalg.norm(m - closest, axis=1)
+      i_min = int(np.argmin(d))
+      dmin = float(d[i_min])
+      if dmin < best_d:
+        best_d = dmin
+        tt = float(t[i_min])
+        xyz = p3a[i_min] + tt * (p3b[i_min] - p3a[i_min])
+        best_id, best_xyz = int(cl_id), np.asarray(xyz, dtype=float)
     if best_id is not None and best_d <= CL_PICK_TOLERANCE_PX:
-      return best_id
+      return best_id, best_xyz
     return None
+
+  def _pick_centerline(self, sx, sy):
+    """Return centerline display id closest (in screen pixels) to (sx, sy).
+
+    Projects each polyline vertex to screen space and measures the minimum
+    point-to-segment distance from the click to each polyline. The nearest
+    polyline wins if its distance is within :data:`CL_PICK_TOLERANCE_PX`.
+    """
+    det = self._pick_centerline_detail(sx, sy)
+    return det[0] if det is not None else None
 
   def clear(self):
     """Remove all GL drawables (no axis triad at the origin)."""
@@ -819,8 +1002,15 @@ class Scene3D(QWidget):
       mid = pts[pts.shape[0] // 2]
       self._digit(mid + np.array([0.0, 0.0, 0.1 * s]), idx, (0.1, 0.1, 0.1, 1.0), 0.52 * s)
 
-  def draw_bifurcations(self, graph, selected_key, preserve_camera=False):
-    """Render graph edges, furcation nodes, and pick targets in ``self._bif_pick``."""
+  def draw_bifurcations(self, graph, selected_key, preserve_camera=False,
+                        invalid_keys=frozenset()):
+    """Render graph edges, furcation nodes, and pick targets in ``self._bif_pick``.
+
+    ``invalid_keys`` is a set of unsigned-index frozensets (one per bifurcation
+    whose per-bif hex mesh failed :meth:`Mesh.is_valid`). Those centroids are
+    drawn with an extra large dark-red halo so the user can spot them before
+    exporting.
+    """
     self.clear()
     if self.view is None:
       return
@@ -837,21 +1027,37 @@ class Scene3D(QWidget):
       c = QColor.fromHsv((idx * 37) % 360, 180, 220)
       self._line(pts, (c.redF(), c.greenF(), c.blueF(), 1.0), 1.0, **_bif_gl)
       all_pts.append(pts)
-    unsel_centers, sel_centers = [], []
+    unsel_centers, sel_centers, invalid_centers = [], [], []
+    # Dark crimson halo for invalid bifurcations — strong enough to dominate
+    # the normal red markers and the black "selected" dot.
+    bif_invalid_color = (0.60, 0.00, 0.00, 1.0)
+    invalid_halo_size = SEL_BIF_BLACK_SIZE_PX + 14.0
     for furc in graph.nontrivial_furcations:
       center = np.asarray(furc.centroid, dtype=float).ravel()
       key = frozenset(int(i) for i in furc.indices)
+      unsigned_key = frozenset(abs(int(i)) for i in furc.indices)
       sel = selected_key is not None and key == selected_key
+      invalid = unsigned_key in invalid_keys
       marker_size = SEL_BIF_BLACK_SIZE_PX if sel else RED_BIF_SIZE_PX
-      # Make click area cover the visible marker radius.
       pick_tol = max(PICK_TOLERANCE_PX, 0.6 * marker_size)
       self._bif_pick.append((key, center, pick_tol))
       (sel_centers if sel else unsel_centers).append(center)
+      if invalid:
+        invalid_centers.append(center)
       for signed in furc.indices:
         edge = graph.get_edges([abs(signed)])[0]
         endpoint = edge.points[-1, :3] if signed > 0 else edge.points[0, :3]
         # Same red as markers; orange/green spokes looked yellow where they met the centroid.
         self._line(np.vstack([endpoint, center]), bif_pt_color, 2.4 if sel else 1.4, **_bif_gl)
+    # Invalid halo goes below the normal markers so the red/black dots still
+    # sit visibly on top.
+    if invalid_centers:
+      p = np.asarray(invalid_centers, dtype=float)
+      s = gl.GLScatterPlotItem(
+        pos=p, color=bif_invalid_color, size=invalid_halo_size, glOptions="opaque"
+      )
+      s.setDepthValue(9)
+      self.view.addItem(s); self.items.append(s); all_pts.append(p)
     if unsel_centers:
       p = np.asarray(unsel_centers, dtype=float)
       s = gl.GLScatterPlotItem(
@@ -992,10 +1198,208 @@ class Scene3D(QWidget):
     step = max(1, int(np.ceil(points.shape[0] / MAX_MESH_PREVIEW_POINTS)))
     self.mesh_simplified = step > 1
     p = points[::step]
-    s = gl.GLScatterPlotItem(pos=p, color=mesh_rgb_a, size=2.5, glOptions="opaque")
+    s = gl.GLScatterPlotItem(
+      pos=p, color=MESH_FALLBACK_SCATTER_RGBA, size=2.5, glOptions="opaque"
+    )
     self.view.addItem(s)
     self.items.append(s)
     self._fit(p)
+
+  def draw_fix_view(
+    self,
+    centerlines,
+    selected_id=None,
+    border_points=None,
+    fix_bif_ref=None,
+    show_mesh=False,
+    mesh=None,
+    preview_points=None,
+    boundary_wire=None,
+    boundary_scatter=None,
+    boundary_faces=None,
+    preserve_camera=False,
+  ):
+    """Centerlines plus optional mesh boundary overlay and branch-anchor markers.
+
+    Used by **Fix bifurcation** view: optional mesh plus **vascular-graph**
+    vessel polylines (same geometry as Bifurcations mode) for branch picks.
+
+    ``fix_bif_ref`` is ``(centroid_xyz, branch_roots)`` for the **selected**
+    bifurcation: each branch root matches :func:`mesh._build_bif_mesh` —
+    ``cline([interval[1]])`` on the **rfac-truncated** spline edge oriented into
+    the junction (baseline graph, **no** queued fix-anchor trims).  If that
+    snapshot fails, raw polyline junction endpoints are used instead.
+    """
+    self.clear()
+    if self.view is None:
+      return
+    centerlines = list(centerlines)
+    border_points = list(border_points or [])
+    ref_centroid = None
+    ref_roots_arr = None
+    if fix_bif_ref is not None:
+      c0, roots = fix_bif_ref
+      if c0 is not None and roots:
+        ref_centroid = np.asarray(c0, dtype=float).ravel()[:3]
+        ref_roots_arr = np.asarray(
+          [np.asarray(r, dtype=float).ravel()[:3] for r in roots],
+          dtype=float,
+        )
+        if ref_roots_arr.ndim != 2 or ref_roots_arr.shape[0] == 0:
+          ref_centroid = None
+          ref_roots_arr = None
+    all_pts = []
+    self.mesh_simplified = False
+    face_rgba = (0.75, 0.75, 0.75, 1.0)
+    edge_rgba = (0.02, 0.38, 0.95, 1.0)
+    vert_rgba = (0.02, 0.38, 0.95, 1.0)
+    if show_mesh and mesh is not None:
+      wpos = boundary_wire
+      scat = boundary_scatter
+      tris = boundary_faces
+      if wpos is None and scat is None and tris is None:
+        wpos, scat, tris = _boundary_preview_arrays(mesh)
+      drew = False
+      if tris is not None and scat is not None and len(tris) > 0 and len(scat) > 0:
+        verts = np.ascontiguousarray(np.asarray(scat, dtype=float))
+        faces = np.ascontiguousarray(np.asarray(tris, dtype=np.int64))
+        face_colors = np.tile(np.asarray(face_rgba, dtype=float), (faces.shape[0], 1))
+        try:
+          mesh_item = gl.GLMeshItem(
+            vertexes=verts,
+            faces=faces,
+            faceColors=face_colors,
+            smooth=False,
+            drawEdges=False,
+            drawFaces=True,
+            shader=None,
+            glOptions="opaque",
+          )
+          mesh_item.setDepthValue(-1)
+          self.view.addItem(mesh_item)
+          self.items.append(mesh_item)
+          all_pts.append(verts)
+          drew = True
+        except Exception:
+          pass
+      if wpos is not None and len(wpos) > 0:
+        ln = gl.GLLinePlotItem(
+          pos=wpos,
+          color=edge_rgba,
+          width=2.5,
+          antialias=True,
+          mode="lines",
+          glOptions="opaque",
+        )
+        ln.setDepthValue(5)
+        self.view.addItem(ln)
+        self.items.append(ln)
+        all_pts.append(wpos)
+        drew = True
+      if scat is not None and len(scat) > 0:
+        s = gl.GLScatterPlotItem(
+          pos=np.asarray(scat, dtype=float),
+          color=vert_rgba,
+          size=3.0,
+          glOptions="opaque",
+        )
+        s.setDepthValue(6)
+        self.view.addItem(s)
+        self.items.append(s)
+        all_pts.append(np.asarray(scat, dtype=float))
+        drew = True
+      if not drew:
+        if preview_points is not None:
+          points = np.asarray(preview_points, dtype=float)
+        else:
+          bpts = _extract_boundary_points_for_preview(mesh)
+          points = bpts
+        if points is not None and points.ndim == 2 and points.shape[1] >= 3:
+          points = points[:, :3]
+          step = max(1, int(np.ceil(points.shape[0] / MAX_MESH_PREVIEW_POINTS)))
+          self.mesh_simplified = step > 1
+          p = points[::step]
+          s = gl.GLScatterPlotItem(
+            pos=p, color=MESH_FALLBACK_SCATTER_RGBA, size=2.5, glOptions="opaque"
+          )
+          s.setDepthValue(4)
+          self.view.addItem(s)
+          self.items.append(s)
+          all_pts.append(p)
+
+    for idx, pts in centerlines:
+      if pts.shape[0] < 2:
+        continue
+      c = QColor.fromHsv((idx * 37) % 360, 220, 220)
+      self._line(
+        pts, (c.redF(), c.greenF(), c.blueF(), 1.0), 1.2, glOptions="opaque"
+      )
+      self._cl_pick.append((int(idx), np.asarray(pts, dtype=float)))
+      all_pts.append(pts)
+    if ref_centroid is not None and ref_roots_arr is not None:
+      all_pts.append(ref_centroid.reshape(1, 3))
+      all_pts.append(ref_roots_arr)
+    if not all_pts and not border_points:
+      return
+    if selected_id is not None:
+      for idx, pts in centerlines:
+        if int(idx) != int(selected_id) or pts.shape[0] < 2:
+          continue
+        self._line(pts, (0.04, 0.04, 0.04, 1.0), 3.0, glOptions="opaque")
+        break
+    if all_pts:
+      all_pts_arr = np.concatenate(all_pts, axis=0)
+      if preserve_camera:
+        mins, maxs = all_pts_arr.min(axis=0), all_pts_arr.max(axis=0)
+        r = max(1e-3, 0.5 * np.max(maxs - mins))
+        s = 0.016 * r
+      else:
+        s = self._fit(all_pts_arr)
+    else:
+      s = self._fit(np.asarray(border_points, dtype=float))
+    for idx, pts in centerlines:
+      if pts.shape[0] < 2:
+        continue
+      mid = pts[pts.shape[0] // 2]
+      self._digit(
+        mid + np.array([0.0, 0.0, 0.1 * s]),
+        idx,
+        (0.1, 0.1, 0.1, 1.0),
+        0.52 * s,
+      )
+    if ref_centroid is not None and ref_roots_arr is not None:
+      ref_rgba = (0.92, 0.48, 0.06, 1.0)
+      line_kw = {"glOptions": "opaque"}
+      c = ref_centroid
+      for r in ref_roots_arr:
+        self._line(np.vstack([r, c]), ref_rgba, 2.0, **line_kw)
+      s_roots = gl.GLScatterPlotItem(
+        pos=ref_roots_arr, color=ref_rgba, size=9.0, glOptions="opaque"
+      )
+      s_roots.setDepthValue(17)
+      self.view.addItem(s_roots)
+      self.items.append(s_roots)
+      s_cent = gl.GLScatterPlotItem(
+        pos=c.reshape(1, 3),
+        color=(0.72, 0.30, 0.02, 1.0),
+        size=7.0,
+        glOptions="opaque",
+      )
+      s_cent.setDepthValue(16)
+      self.view.addItem(s_cent)
+      self.items.append(s_cent)
+    if border_points:
+      p = np.asarray(border_points, dtype=float)
+      if p.size:
+        s_mark = gl.GLScatterPlotItem(
+          pos=p,
+          color=(0.05, 0.65, 0.12, 1.0),
+          size=10.0,
+          glOptions="opaque",
+        )
+        s_mark.setDepthValue(20)
+        self.view.addItem(s_mark)
+        self.items.append(s_mark)
 
 
 class MeshGeneratorWindow(QMainWindow):
@@ -1015,6 +1419,36 @@ class MeshGeneratorWindow(QMainWindow):
     self._mesh_preview_boundary_scatter = None
     self._mesh_preview_boundary_faces = None
     self._mesh_stats = None
+    # {frozenset(bif indices) → bool}. Populated after every successful mesh
+    # generation so the bifurcation view / list can flag invalid ones in red
+    # without needing a separate re-run.
+    self._bif_validity = {}
+    # {frozenset(bif indices) → repair_info_dict | None}. Parallel to
+    # ``_bif_validity``; carries per-branch rfac details for bifurcations
+    # that the retry cascade touched (whether it succeeded or exhausted).
+    self._bif_repair = {}
+    # {frozenset(bif indices) → list of overlap dicts}. Each entry notes a
+    # shared edge where the two adjacent bifurcations' truncations leave a
+    # near-degenerate vessel stub between them → merge candidate.  The
+    # list is empty for bifurcations with no close neighbours.
+    self._bif_overlaps = {}
+    # Connected components of the merge-candidate graph, as emitted by
+    # ``make_spline_mesh``.  Each entry: {"component_id": str, "bif_keys":
+    # tuple[frozenset[int], ...], "internal_edges": tuple[int, ...]}.  The
+    # Bifurcations panel renders one checkbox per component at its top.
+    self._merge_components: list[dict] = []
+    # Set of component_ids the user has checked ⇒ will be folded into a
+    # single n-furcation on the next Generate mesh click.  Persisted across
+    # generations so toggling the checkbox is sticky even when the mesh is
+    # regenerated (the same component usually recomputes with the same id).
+    self._merge_opt_in: set[str] = set()
+    # Last ``merge_opt_in`` tuple passed to :func:`generate_mesh` (immutable snapshot).
+    self._last_merge_opt_in: tuple[tuple[tuple[int, ...], ...], ...] = ()
+    # Post-merge :class:`~artery.VascularGraph` for bif list + Bifurcations 3D when
+    # the last successful mesh used opt-in merges; else ``None`` → use ``_graph_cache``.
+    self._graph_for_bif_ui = None
+    # Unsigned bif keys that are user-merged n-furcations in ``_graph_for_bif_ui``.
+    self._merged_bif_unsigned_keys: frozenset = frozenset()
     self._mesh_thread = None
     self.last_mesh_path = ""
     self._selected_bif_key = None
@@ -1023,6 +1457,14 @@ class MeshGeneratorWindow(QMainWindow):
     self._removed_centerline_ids = set()
     self._manual_additions = []
     self._last_view_mode = "Centerlines"
+    # (edge_display_id, world_xyz) anchors along each branch — Fix bifurcation mode.
+    self._fix_border_hits: list[tuple[int, np.ndarray]] = []
+    # Completed or in-progress picks per bif key (survives switching list rows).
+    self._fix_anchors_by_bif = {}
+    self._pending_fix_anchor_mesh = False
+    # Spline + ``mesh_rfac`` truncation snapshot for Fix-mode orange markers.
+    self._fix_rfac_trunc_cache_key = None
+    self._fix_rfac_trunc_data = None
 
     # --- Central widget: splitter fills height; grip row fixed at bottom ------------
     root = QWidget()
@@ -1056,6 +1498,7 @@ class MeshGeneratorWindow(QMainWindow):
     left_layout = QVBoxLayout(left_content)
     left_layout.addWidget(self._input_group())
     left_layout.addWidget(self._bifurcation_group(), stretch=1)
+    left_layout.addWidget(self._fix_bif_group())
     left_layout.addWidget(self._mesh_group())
 
     left_scroll = QScrollArea()
@@ -1098,22 +1541,22 @@ class MeshGeneratorWindow(QMainWindow):
     self.scene.on_bif_click = self._on_bif_clicked_3d
     self.scene.on_cl_click = self._on_cl_clicked_3d
     right_layout.addWidget(self.scene, stretch=4)
-    id_map_hdr = QLabel("Centerline ID map")
-    id_map_hdr.setToolTip(
+    self.id_map_hdr = QLabel("Centerline ID map")
+    self.id_map_hdr.setToolTip(
       "Select a row to highlight that centerline in 3D; click a centerline "
       "in 3D to select its row. Use Delete Selected Centerline below."
     )
-    right_layout.addWidget(id_map_hdr)
+    right_layout.addWidget(self.id_map_hdr)
     self.id_map = QListWidget()
     self.id_map.currentItemChanged.connect(self._on_id_map_item_changed)
     right_layout.addWidget(self.id_map, stretch=1)
     cl_btn_row = QHBoxLayout()
-    b_cl_del = QPushButton("Delete Selected Centerline")
-    b_cl_del.clicked.connect(self._delete_selected_centerline)
-    b_cl_reset = QPushButton("Reset Removed Centerlines")
-    b_cl_reset.clicked.connect(self._reset_removed_centerlines)
-    cl_btn_row.addWidget(b_cl_del)
-    cl_btn_row.addWidget(b_cl_reset)
+    self.b_cl_del = QPushButton("Delete Selected Centerline")
+    self.b_cl_del.clicked.connect(self._delete_selected_centerline)
+    self.b_cl_reset = QPushButton("Reset Removed Centerlines")
+    self.b_cl_reset.clicked.connect(self._reset_removed_centerlines)
+    cl_btn_row.addWidget(self.b_cl_del)
+    cl_btn_row.addWidget(self.b_cl_reset)
     right_layout.addLayout(cl_btn_row)
 
     splitter.addWidget(left_strip)
@@ -1154,20 +1597,16 @@ class MeshGeneratorWindow(QMainWindow):
 
   def _init_logo(self):
     """Set window icon from project logo if available."""
-    logo_path = self._resolve_logo_path(kind="pictogram")
+    logo_path = _resolve_logo_path(kind="pictogram")
     if logo_path is None:
       return
     icon = QIcon(logo_path)
     if not icon.isNull():
       self.setWindowIcon(icon)
 
-  def _resolve_logo_path(self, kind: str = "logotipo"):
-    """Resolve preferred logo file under repo assets."""
-    return _resolve_logo_path(kind=kind)
-
   def _logo_label(self, width=260):
     """Create a visible logo label (e.g. header)."""
-    logo_path = self._resolve_logo_path(kind="logotipo")
+    logo_path = _resolve_logo_path(kind="logotipo")
     if logo_path is None:
       return None
     pix = QPixmap(logo_path)
@@ -1203,7 +1642,167 @@ class MeshGeneratorWindow(QMainWindow):
     self._mesh_preview_boundary_wire = None
     self._mesh_preview_boundary_scatter = None
     self._mesh_preview_boundary_faces = None
+    self._bif_validity = {}
+    self._bif_repair = {}
+    self._bif_overlaps = {}
+    # Note: ``_merge_opt_in`` is *not* reset here.  The cache-invalidation
+    # path is triggered by graph edits (delete/add bifurcation, reload CSV,
+    # etc.) and it's surprising to lose the user's merge decisions after
+    # e.g. nudging a split tolerance.  ``_merge_components`` however is
+    # tied to the *current* mesh computation — drop it so stale checkboxes
+    # don't linger while ``last_mesh`` is None.
+    self._merge_components = []
+    self._fix_border_hits = []
+    self._fix_anchors_by_bif.clear()
+    self._pending_fix_anchor_mesh = False
+    self._last_merge_opt_in = ()
+    self._graph_for_bif_ui = None
+    self._merged_bif_unsigned_keys = frozenset()
+    self._fix_rfac_trunc_cache_key = None
+    self._fix_rfac_trunc_data = None
+    if hasattr(self, "bif_list_invalid_only"):
+      self.bif_list_invalid_only.blockSignals(True)
+      self.bif_list_invalid_only.setChecked(False)
+      self.bif_list_invalid_only.setEnabled(False)
+      self.bif_list_invalid_only.blockSignals(False)
     self._set_mesh_stats(None)
+
+  def _opt_in_components_from_ui(self):
+    """Same merge tuple shape as :func:`generate_mesh` ``merge_opt_in``."""
+    opt_in_components: list[tuple[tuple[int, ...], ...]] = []
+    for comp in (self._merge_components or ()):
+      cid = comp.get("component_id")
+      if cid in self._merge_opt_in:
+        keys = comp.get("bif_keys") or frozenset()
+        opt_in_components.append(tuple(
+          tuple(sorted(int(i) for i in k)) for k in keys
+        ))
+    return opt_in_components
+
+  def _fix_rfac_trunc_overlay_cache_key(self):
+    folder = self.csv_edit.text().strip()
+    if not folder:
+      return None
+    removed_bk = tuple(sorted(
+      (tuple(sorted(abs(int(i)) for i in k)) for k in self._removed_bif_keys),
+      key=lambda t: t,
+    ))
+    manual = tuple(tuple(sorted(int(x) for x in row)) for row in self._manual_additions)
+    rem_cl = tuple(sorted(self._removed_centerline_ids))
+    opt_in = tuple(
+      tuple(tuple(sorted(int(i) for i in k)) for k in comp)
+      for comp in self._opt_in_components_from_ui()
+    )
+    # Intentionally **omit** queued fix-anchor specs: orange shows the baseline
+    # mesh rfac interface on the graph **without** user trims so it stays fixed
+    # while placing green picks (otherwise each completed bif re-trims the
+    # artery and orange jumps away from the click).
+    return (
+      folder,
+      self.split_eps.value(),
+      self.merge_eps.value(),
+      self.use_merge.isChecked(),
+      removed_bk,
+      manual,
+      rem_cl,
+      opt_in,
+      float(self.mesh_dx.value()),
+      int(self.mesh_nref.value()),
+      float(self.mesh_rfac.value()),
+    )
+
+  def _sgraph_trunc_for_fix_rfac_overlay(self):
+    """Build ``(SplineGraph, truncate_dict)`` for **baseline** mesh rfac (no fix anchors).
+
+    Queued green picks are **not** applied here so amber stays aligned with the
+    automatic cut while you place anchors; ``generate_mesh`` still applies
+    ``fix_anchor_specs`` before the spline stage.
+    """
+    from mesh import apply_merge_opt_in_vgraph, _compute_truncate_dict
+    ck = self._fix_rfac_trunc_overlay_cache_key()
+    if ck is None:
+      return None
+    if ck == self._fix_rfac_trunc_cache_key and self._fix_rfac_trunc_data is not None:
+      return self._fix_rfac_trunc_data
+    folder = self.csv_edit.text().strip()
+    try:
+      artery = build_graph(
+        folder,
+        self.split_eps.value(),
+        self.merge_eps.value(),
+        self.use_merge.isChecked(),
+        self._removed_bif_keys,
+        self._manual_additions,
+        removed_centerline_ids=frozenset(self._removed_centerline_ids),
+      )
+      artery = artery.orient_nontrivial()
+      artery, _mk = apply_merge_opt_in_vgraph(
+        artery, self._opt_in_components_from_ui(),
+      )
+      artery = (
+        artery.align_nontrivial_normals()
+        .orient_trivial()
+        .rtruncate(1)
+        .furcomplete(npoints=1001)
+        .delete_twofurcations()
+        .align_frames()
+      )
+      dx = float(self.mesh_dx.value())
+      nref = int(self.mesh_nref.value())
+      rfac = float(self.mesh_rfac.value())
+      sgraph = artery.to_spline_graph(dx=dx)
+      xis = [e.knotvector[0].refine(nref).knots for e in sgraph.edges]
+      xidict = dict(zip(sgraph.indices, xis))
+      trunc = _compute_truncate_dict(sgraph, xis, xidict, rfac)
+    except Exception:
+      return None
+    self._fix_rfac_trunc_cache_key = ck
+    self._fix_rfac_trunc_data = (sgraph, trunc)
+    return self._fix_rfac_trunc_data
+
+  def _persist_current_fix_hits(self):
+    k = self._selected_bif_key
+    if k is None:
+      return
+    if not self._fix_border_hits:
+      self._fix_anchors_by_bif.pop(k, None)
+    else:
+      self._fix_anchors_by_bif[k] = [
+        (int(e), np.asarray(p, dtype=float).copy()) for e, p in self._fix_border_hits
+      ]
+
+  def _sync_fix_hits_from_storage(self):
+    k = self._selected_bif_key
+    if k is None:
+      self._fix_border_hits = []
+      return
+    stored = self._fix_anchors_by_bif.get(k)
+    if not stored:
+      self._fix_border_hits = []
+    else:
+      self._fix_border_hits = [
+        (int(e), np.asarray(p, dtype=float).copy()) for e, p in stored
+      ]
+
+  def _all_fix_anchor_xyz_for_draw(self):
+    out = []
+    for hits in self._fix_anchors_by_bif.values():
+      for _e, p in hits:
+        out.append(np.asarray(p, dtype=float).ravel()[:3])
+    return out
+
+  def _complete_fix_anchor_specs(self):
+    specs = []
+    for bif_key, hits in self._fix_anchors_by_bif.items():
+      need = {abs(int(i)) for i in bif_key}
+      got = {int(p[0]) for p in hits}
+      if need != got or len(hits) != len(need):
+        continue
+      specs.append((
+        bif_key,
+        {int(eid): np.asarray(xyz, dtype=float).reshape(3).copy() for eid, xyz in hits},
+      ))
+    return specs
 
   # --- QWidget groups (left panel) -------------------------------------------
 
@@ -1218,7 +1817,7 @@ class MeshGeneratorWindow(QMainWindow):
     b_out = QPushButton("Browse...")
     b_out.clicked.connect(self._choose_out)
     self.mode = QComboBox()
-    self.mode.addItems(["Centerlines", "Bifurcations", "Mesh"])
+    self.mode.addItems(["Centerlines", "Bifurcations", "Mesh", "Fix bifurcation"])
     self.mode.currentIndexChanged.connect(self._on_view_mode_changed)
     b_refresh = QPushButton("Refresh Preview")
     b_refresh.clicked.connect(self._refresh)
@@ -1235,18 +1834,13 @@ class MeshGeneratorWindow(QMainWindow):
     self.split_eps = QDoubleSpinBox(); self.split_eps.setDecimals(4); self.split_eps.setRange(0.0001, 10.0); self.split_eps.setValue(0.06); self.split_eps.valueChanged.connect(self._refresh)
     self.use_merge = QCheckBox("Use merge_furcs_proximity"); self.use_merge.setChecked(True); self.use_merge.stateChanged.connect(self._refresh)
     self.merge_eps = QDoubleSpinBox(); self.merge_eps.setDecimals(4); self.merge_eps.setRange(0.0001, 10.0); self.merge_eps.setValue(0.07); self.merge_eps.valueChanged.connect(self._refresh)
-    self.spline_points = QSpinBox()
-    self.spline_points.setRange(5, 500)
-    self.spline_points.setValue(21)
-    self.spline_points.valueChanged.connect(self._refresh)
     l.addWidget(QLabel("split_edges eps"), 0, 0); l.addWidget(self.split_eps, 0, 1)
     l.addWidget(self.use_merge, 1, 0, 1, 2)
     l.addWidget(QLabel("merge_furcs eps"), 2, 0); l.addWidget(self.merge_eps, 2, 1)
-    l.addWidget(QLabel("Spline points"), 3, 0); l.addWidget(self.spline_points, 3, 1)
     self._bif_edit_group = self._edit_group()
-    l.addWidget(self._bif_edit_group, 4, 0, 1, 2)
+    l.addWidget(self._bif_edit_group, 3, 0, 1, 2)
     # Let the editing block absorb extra vertical space inside this group box.
-    l.setRowStretch(4, 1)
+    l.setRowStretch(3, 1)
     g.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
     return g
 
@@ -1277,6 +1871,31 @@ class MeshGeneratorWindow(QMainWindow):
 
     col_left = QVBoxLayout()
     col_left.addWidget(QLabel("Detected bifurcations (list → large black centroid in 3D; or click red marker)"))
+    # Merge-candidate checkbox host: one QCheckBox per connected component
+    # of the "too-close" overlap graph is injected here by
+    # ``_fill_merge_checkboxes`` after each mesh generation.  Empty until a
+    # mesh with detected overlaps is produced; hidden entirely when empty
+    # so it doesn't take panel real estate from the bif list below.
+    self._merge_panel = QGroupBox("Merge candidates")
+    self._merge_panel.setSizePolicy(
+      QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed,
+    )
+    self._merge_panel_layout = QVBoxLayout(self._merge_panel)
+    self._merge_panel_layout.setContentsMargins(6, 4, 6, 4)
+    self._merge_panel_layout.setSpacing(2)
+    self._merge_panel.setVisible(False)
+    # Keep a dict of component_id → QCheckBox so toggling the stored opt-in
+    # state can update widgets without a full rebuild.
+    self._merge_checkboxes: dict = {}
+    col_left.addWidget(self._merge_panel)
+    self.bif_list_invalid_only = QCheckBox("List invalid bifurcations only")
+    self.bif_list_invalid_only.setToolTip(
+      "After Generate mesh, show only junctions whose bifurcation hex failed "
+      "is_valid() (red [INVALID]). Uncheck to list every bifurcation again."
+    )
+    self.bif_list_invalid_only.setEnabled(False)
+    self.bif_list_invalid_only.toggled.connect(self._on_bif_invalid_filter_toggled)
+    col_left.addWidget(self.bif_list_invalid_only)
     col_left.addWidget(self.bif_list, 1)
     col_left.addWidget(b_del)
     col_left.addWidget(b_reset)
@@ -1349,6 +1968,37 @@ class MeshGeneratorWindow(QMainWindow):
     l.addWidget(self.mesh_stats_label, 10, 0, 1, 2)
     return g
 
+  def _fix_bif_group(self):
+    """Widgets for **Fix bifurcation** view (mesh + bif-view vessels + picks)."""
+    g = QGroupBox("Fix bifurcation")
+    g.setVisible(False)
+    v = QVBoxLayout(g)
+    self.fix_hint = QLabel(
+      "Use after a mesh run. Pick a bifurcation in the list, then click each "
+      "incident vessel in 3D — same curves as Bifurcations mode (graph edges), "
+      "not raw CSV polylines. Esc clears markers."
+    )
+    self.fix_hint.setWordWrap(True)
+    self.fix_show_mesh = QCheckBox("Show mesh overlay")
+    self.fix_show_mesh.setChecked(True)
+    self.fix_show_mesh.setToolTip(
+      "Turn off to see only bif-view vessels and your branch anchors."
+    )
+    self.fix_show_mesh.toggled.connect(self._on_fix_show_mesh_toggled)
+    b_clear = QPushButton("Clear branch picks")
+    b_clear.clicked.connect(self._clear_fix_picks)
+    b_clear_all = QPushButton("Clear all fix anchors")
+    b_clear_all.setToolTip(
+      "Remove stored branch anchors for every bifurcation (not only the selected one)."
+    )
+    b_clear_all.clicked.connect(self._clear_all_fix_anchors)
+    v.addWidget(self.fix_hint)
+    v.addWidget(self.fix_show_mesh)
+    v.addWidget(b_clear)
+    v.addWidget(b_clear_all)
+    self._fix_group = g
+    return g
+
   # --- Slots and application logic -------------------------------------------
 
   def _set_defaults(self):
@@ -1409,6 +2059,146 @@ class MeshGeneratorWindow(QMainWindow):
       removed_centerline_ids=frozenset(self._removed_centerline_ids),
     )
 
+  def _graph_for_bif_list_and_3d(self):
+    """Graph for the bif list + Bifurcations 3D (post-merge if last mesh merged)."""
+    g = self._graph_for_bif_ui
+    return g if g is not None else self._graph_cache
+
+  def _fix_mode_branch_polylines(self):
+    """``(edge_id, (n,3))`` polylines from the graph used for Bifurcations / bif list.
+
+    Matches :meth:`Scene3D.draw_bifurcations` edge sampling so picks land on
+    split/merged topology, not raw CSV centerlines.
+    """
+    g = self._graph_for_bif_list_and_3d()
+    out: list[tuple[int, np.ndarray]] = []
+    for idx, edge in zip(g.indices, g.edges):
+      pts = np.asarray(edge.points, dtype=float)
+      if pts.ndim != 2 or pts.shape[1] < 3:
+        continue
+      p3 = np.ascontiguousarray(pts[:, :3].copy())
+      if p3.shape[0] < 2:
+        continue
+      out.append((int(idx), p3))
+    return out
+
+  def _fix_mode_mesh_rfac_bif_reference(self):
+    """``(centroid, branch_xyz)`` on the **truncated** spline where bif mesh meets vessels.
+
+    Matches :func:`mesh._build_bif_mesh`: after the same ``truncate_dict`` as
+    :func:`mesh.make_spline_mesh` (baseline ``mesh_rfac`` / ``mesh_nref``), each
+    branch uses ``get_edges([signed])`` then ``edge.cline([edge.interval[1]])`` —
+    not raw ``truncate_dict`` knots evaluated on the **pre**-truncation edge
+    (split/reparam and orientation differ).  Computed **without** queued fix
+    anchors so amber does not move when you finish green picks.  Per-branch
+    rfac repair overrides are not applied here.
+    """
+    pair = self._sgraph_trunc_for_fix_rfac_overlay()
+    if pair is None:
+      return None
+    sgraph, trunc = pair
+    k = self._selected_bif_key
+    if k is None:
+      return None
+    try:
+      _sgraph = sgraph.truncate_edges(trunc)
+    except Exception:
+      return None
+    key_set = frozenset(int(i) for i in k)
+    furc = None
+    for f in _sgraph.nontrivial_furcations:
+      if frozenset(int(i) for i in f.indices) == key_set:
+        furc = f
+        break
+    if furc is None:
+      return None
+    centroid = np.asarray(furc.centroid, dtype=float).ravel()[:3]
+    roots = []
+    for signed in furc.indices:
+      try:
+        edge = _sgraph.get_edges([signed])[0]
+      except Exception:
+        return None
+      xi_face = float(edge.interval[1])
+      try:
+        p = np.asarray(edge.cline([xi_face]), dtype=float).ravel()[:3]
+      except Exception:
+        return None
+      roots.append(p.copy())
+    if len(roots) != len(furc.indices):
+      return None
+    return (centroid, roots)
+
+  def _fix_mode_polyline_endpoint_bif_reference(self):
+    """``(centroid, branch_xyz)`` from raw graph polylines (pre-spline / full length)."""
+    g = self._graph_for_bif_list_and_3d()
+    k = self._selected_bif_key
+    if g is None or k is None:
+      return None
+    key_set = frozenset(int(i) for i in k)
+    for furc in g.nontrivial_furcations:
+      if frozenset(int(i) for i in furc.indices) != key_set:
+        continue
+      centroid = np.asarray(furc.centroid, dtype=float).ravel()[:3]
+      roots = []
+      for signed in furc.indices:
+        eid = abs(int(signed))
+        try:
+          edge = g.get_edges([eid])[0]
+        except Exception:
+          continue
+        pts = np.asarray(edge.points, dtype=float)
+        if pts.shape[0] < 2 or pts.shape[1] < 3:
+          continue
+        endpoint = pts[-1, :3] if int(signed) > 0 else pts[0, :3]
+        roots.append(np.asarray(endpoint, dtype=float).ravel()[:3].copy())
+      if not roots:
+        return None
+      return (centroid, roots)
+    return None
+
+  def _fix_mode_selected_bif_reference(self):
+    """Amber reference: mesh ``rfac`` spline cuts, else polyline junction endpoints."""
+    ref = self._fix_mode_mesh_rfac_bif_reference()
+    if ref is not None:
+      return ref
+    return self._fix_mode_polyline_endpoint_bif_reference()
+
+  def _set_right_panel_fix_mode(self, fix: bool):
+    """Fix mode: graph-edge list + disable CSV centerline delete (IDs differ)."""
+    if fix:
+      self.id_map_hdr.setText("Graph edges (Bifurcations view vessels)")
+      self.id_map_hdr.setToolTip(
+        "Each row is a vascular-graph edge id — the same polylines as in "
+        "Bifurcations 3D (after split/merge). Branch picks use these curves, "
+        "not raw CSV centerlines."
+      )
+      self.b_cl_del.setEnabled(False)
+      self.b_cl_reset.setEnabled(False)
+    else:
+      self.id_map_hdr.setText("Centerline ID map")
+      self.id_map_hdr.setToolTip(
+        "Select a row to highlight that centerline in 3D; click a centerline "
+        "in 3D to select its row. Use Delete Selected Centerline below."
+      )
+      self.b_cl_del.setEnabled(True)
+      self.b_cl_reset.setEnabled(True)
+
+  def _rebuild_graph_for_bif_ui(self, merge_opt_in):
+    """Rebuild post-merge :class:`~artery.VascularGraph` after a successful mesh."""
+    from mesh import apply_merge_opt_in_vgraph
+    self._graph_for_bif_ui = None
+    self._merged_bif_unsigned_keys = frozenset()
+    if not merge_opt_in:
+      return
+    try:
+      g0 = self._graph().orient_nontrivial()
+      g_merged, mk2m = apply_merge_opt_in_vgraph(g0, merge_opt_in)
+      self._graph_for_bif_ui = g_merged
+      self._merged_bif_unsigned_keys = frozenset(mk2m.keys())
+    except Exception:
+      pass
+
   def _reload_preview_data(self):
     """Reload centerlines CSVs and rebuild the vascular graph + bif lists."""
     folder = self.csv_edit.text().strip()
@@ -1417,6 +2207,11 @@ class MeshGeneratorWindow(QMainWindow):
       return False
     self._centerlines, self._filenames = self._load_centerlines(folder)
     self._graph_cache = self._graph()
+    if self.last_mesh is not None:
+      self._rebuild_graph_for_bif_ui(self._last_merge_opt_in)
+    else:
+      self._graph_for_bif_ui = None
+      self._merged_bif_unsigned_keys = frozenset()
     self._fill_bif_list()
     self._fill_add_list()
     return True
@@ -1427,6 +2222,14 @@ class MeshGeneratorWindow(QMainWindow):
       return
     prev = self._last_view_mode
     mode = self.mode.itemText(index)
+
+    if prev == "Fix bifurcation" and mode != "Fix bifurcation":
+      self._persist_current_fix_hits()
+      self.scene.on_cl_click_detail = None
+      self.scene.on_bif_click = self._on_bif_clicked_3d
+      self.scene.on_cl_click = self._on_cl_clicked_3d
+      self._fix_group.setVisible(False)
+
     if mode == "Bifurcations":
       try:
         if not self._reload_preview_data():
@@ -1444,6 +2247,31 @@ class MeshGeneratorWindow(QMainWindow):
       self._render_mode(preserve_camera=(prev == "Bifurcations"))
       self._last_view_mode = mode
       return
+    if mode == "Fix bifurcation":
+      self.scene.on_cl_click_detail = self._on_fix_border_pick
+      self.scene.on_bif_click = None
+      self.scene.on_cl_click = None
+      self._fix_group.setVisible(True)
+      self.fix_show_mesh.setEnabled(self.last_mesh is not None)
+      try:
+        if not self._reload_preview_data():
+          self._last_view_mode = mode
+          return
+      except Exception:
+        self._set_status(f"Preview error: {traceback.format_exc().splitlines()[-1]}")
+        self._last_view_mode = mode
+        return
+      self._sync_fix_hits_from_storage()
+      self._update_fix_hint()
+      self._render_fix_mode(
+        preserve_camera=(prev in ("Mesh", "Fix bifurcation", "Centerlines")),
+      )
+      self._last_view_mode = mode
+      return
+    if mode == "Mesh":
+      self._render_mode(preserve_camera=False)
+      self._last_view_mode = mode
+      return
     self._render_mode(preserve_camera=False)
     self._last_view_mode = mode
 
@@ -1456,17 +2284,349 @@ class MeshGeneratorWindow(QMainWindow):
       if not self._reload_preview_data():
         return
       self._last_view_mode = self.mode.currentText()
-      self._render_mode()
+      if self.mode.currentText() == "Fix bifurcation":
+        self.fix_show_mesh.setEnabled(self.last_mesh is not None)
+        self._update_fix_hint()
+        self._render_fix_mode()
+      else:
+        self._render_mode()
     except Exception:
       self._set_status(f"Preview error: {traceback.format_exc().splitlines()[-1]}")
 
+  def _synthetic_merge_components_from_last_opt_in(self):
+    """Rebuild merge-candidate dicts when overlap detection yields an empty list.
+
+    ``make_spline_mesh`` derives ``merge_components`` from post-mesh bif–bif
+    overlap topology.  After an **opt-in** merge, those overlaps are typically
+    gone, so the returned tuple is empty — but :meth:`_fill_merge_checkboxes`
+    would then clear ``_merge_opt_in`` and the **next** Generate would run
+    without merges (e.g. Fix-bifurcation + anchor passes).  Recreate the same
+    ``component_id`` / ``bif_keys`` / ``internal_edges`` shape as
+    :func:`mesh._compute_merge_components` from ``_last_merge_opt_in``, which
+    was frozen for this mesh on the worker launch.
+    """
+    out = []
+    for comp in self._last_merge_opt_in or ():
+      if len(comp) < 2:
+        continue
+      keys = frozenset(frozenset(int(i) for i in k) for k in comp)
+      sig = tuple(sorted(tuple(sorted(kk) for kk in keys)))
+      component_id = "|".join(
+        ",".join(str(i) for i in member) for member in sig
+      )
+      internal = frozenset()
+      try:
+        g = self._graph().orient_nontrivial()
+        component_furcs = [
+          f for f in g.furcations
+          if frozenset(abs(int(i)) for i in f.indices) in keys
+          and len(f) > 2
+        ]
+        if len(component_furcs) >= 2:
+          counts = {}
+          for furc in component_furcs:
+            for i in furc.indices:
+              ai = abs(int(i))
+              counts[ai] = counts.get(ai, 0) + 1
+          internal = frozenset(ai for ai, c in counts.items() if c >= 2)
+      except Exception:
+        pass
+      out.append({
+        "component_id": component_id,
+        "bif_keys": keys,
+        "internal_edges": internal,
+      })
+    return out
+
+  def _fill_merge_checkboxes(self):
+    """Rebuild the checkbox list at the top of the Bifurcations panel.
+
+    One :class:`QCheckBox` is created per entry in ``self._merge_components``;
+    the checkbox's ``toggled`` signal mutates ``self._merge_opt_in`` in
+    place so the state is read directly when the user hits Generate mesh.
+
+    Any component_id present in ``self._merge_opt_in`` but no longer in
+    the fresh component list is dropped — the previous mesh generation's
+    topology is gone, so the stale opt-in would silently do nothing.
+    """
+    from PyQt6.QtWidgets import QCheckBox  # local import: keeps module-top
+    # import block focused on the widgets actually touched at construction
+    # time; QCheckBox is only relevant here.
+
+    # Remove any previous widgets without leaking them (blocks garbage
+    # collection issues on older PyQt builds).
+    while self._merge_panel_layout.count():
+      item = self._merge_panel_layout.takeAt(0)
+      w = item.widget() if item is not None else None
+      if w is not None:
+        w.setParent(None)
+        w.deleteLater()
+    self._merge_checkboxes.clear()
+
+    if not self._merge_components:
+      self._merge_panel.setVisible(False)
+      # Purge opt-ins that no longer map to a current component; if a user
+      # unchecks everything relevant (graph edit invalidated the merge),
+      # the state must not leak to the next generation.
+      self._merge_opt_in.clear()
+      return
+
+    # Drop any persisted opt-in ids that aren't in the newly-detected set
+    # (happens e.g. when the user edits the graph then regenerates — the
+    # same component might or might not re-appear with the same id).
+    current_ids = {c["component_id"] for c in self._merge_components}
+    self._merge_opt_in &= current_ids
+
+    # Short-key lookup: map each unsigned bif key to its "Bk" label as
+    # rendered in the bif list, so the checkbox text reads naturally.
+    vkey_to_label: dict = {}
+    try:
+      graph = self._graph_cache
+      for ib, furc in enumerate(graph.nontrivial_furcations, start=1):
+        vk = frozenset(abs(int(v)) for v in furc.indices)
+        vkey_to_label[vk] = f"B{ib}"
+    except Exception:
+      # Graph cache may be empty before the first refresh — the checkboxes
+      # still work, we just fall back to raw index sets in the label.
+      pass
+
+    for comp in self._merge_components:
+      cid = comp["component_id"]
+      bif_keys = comp.get("bif_keys") or ()
+      internal_edges = comp.get("internal_edges") or ()
+      # Human-readable label: "Merge B1 + B2 + B3 into one 5-furcation (drops e3, e5)"
+      members = [vkey_to_label.get(frozenset(k),
+                                    "{" + ",".join(str(i) for i in sorted(k)) + "}")
+                 for k in bif_keys]
+      members_str = " + ".join(members)
+      # External-branch count = total distinct unsigned indices across the
+      # component minus the internal (shared) edges that get dropped.
+      all_abs = set()
+      for k in bif_keys:
+        all_abs |= set(int(i) for i in k)
+      n_ext = len(all_abs) - len(internal_edges)
+      drops = ", ".join(f"e{i}" for i in internal_edges) or "nothing"
+      cb = QCheckBox(
+        f"Merge {members_str} into one {n_ext}-furcation (drops {drops})"
+      )
+      cb.setToolTip(
+        "On the next Generate mesh click, this component will be collapsed\n"
+        "into a single n-furcation:\n"
+        f"  • constituent bifs: {', '.join(members)}\n"
+        f"  • shared edges dropped from the graph: {drops}\n"
+        f"  • merged n-furcation external branches: {n_ext}\n"
+        "Leave unchecked to keep the per-branch rfac repair scan and the\n"
+        "red [INVALID] flags on the individual bifurcations."
+      )
+      cb.setChecked(cid in self._merge_opt_in)
+      cb.toggled.connect(
+        # Capture cid by default arg so each closure binds its own id.
+        lambda checked, _cid=cid: self._on_merge_checkbox_toggled(_cid, checked)
+      )
+      self._merge_panel_layout.addWidget(cb)
+      self._merge_checkboxes[cid] = cb
+
+    self._merge_panel.setVisible(True)
+
+  def _on_merge_checkbox_toggled(self, component_id: str, checked: bool):
+    """Record / forget a component's opt-in state.
+
+    Doesn't trigger regeneration — the user explicitly clicks Generate
+    mesh afterwards.  The status bar gets a one-line hint so it's obvious
+    the decision has been captured and *will* take effect.
+    """
+    if checked:
+      self._merge_opt_in.add(component_id)
+    else:
+      self._merge_opt_in.discard(component_id)
+    n = len(self._merge_opt_in)
+    if n:
+      self._set_status(
+        f"{n} merge candidate(s) queued — click Generate mesh to apply."
+      )
+    else:
+      self._set_status("Merge candidates cleared.")
+
   def _fill_bif_list(self):
     self.bif_list.clear()
-    for ib, furc in enumerate(self._graph_cache.nontrivial_furcations, start=1):
+    g_src = self._graph_for_bif_list_and_3d()
+    # Unsigned-key → "Bk" for rows in *this* list (merged topology when applicable).
+    vkey_to_label = {
+      frozenset(abs(int(v)) for v in furc.indices): f"B{ib}"
+      for ib, furc in enumerate(g_src.nontrivial_furcations, start=1)
+    }
+    # Pre-merge labels help resolve overlap "partner" keys from the last mesh
+    # when those partners no longer appear as separate rows.
+    vkey_to_label_pre = {
+      frozenset(abs(int(v)) for v in furc.indices): f"B{ib}"
+      for ib, furc in enumerate(self._graph_cache.nontrivial_furcations, start=1)
+    }
+    def _partner_label(vk_partner):
+      return vkey_to_label.get(vk_partner) or vkey_to_label_pre.get(vk_partner, "?")
+
+    for ib, furc in enumerate(g_src.nontrivial_furcations, start=1):
       key = frozenset(int(v) for v in furc.indices)
-      item = QListWidgetItem(f"B{ib}: indices {list(map(int, furc.indices))}")
+      # Validity is keyed on unsigned indices (see ``make_spline_mesh``); the
+      # list / 3D selection flow keeps the signed key untouched.
+      vkey = frozenset(abs(int(v)) for v in furc.indices)
+      validity = self._bif_validity.get(vkey) if self._bif_validity else None
+      if (
+        self.bif_list_invalid_only.isChecked()
+        and self._bif_validity
+        and validity is not False
+      ):
+        continue
+      repair = (self._bif_repair or {}).get(vkey) if self._bif_repair else None
+      overlaps = (self._bif_overlaps or {}).get(vkey) or []
+      label = f"B{ib}: indices {list(map(int, furc.indices))}"
+      # A repair entry may come from either path:
+      #   • per-branch rfac scan  → ``repair`` has ``multipliers`` /
+      #     ``branch_rfac`` / ``tried``;
+      #   • opt-in merge (member rows only) → ``merged_into`` / ``merged_members``.
+      #     List rows use the merged n-furcation directly, so this branch is skipped.
+      is_merged_member = repair is not None and repair.get("merged_into") is not None
+      if validity is False:
+        label += "  [INVALID]"
+      elif validity is True and is_merged_member:
+        n_ext = len(repair.get("merged_into") or ())
+        label += f"  [merged into {n_ext}-furcation]"
+      elif validity is True and repair is not None:
+        # A successful repair: show the multipliers on the label so the user
+        # can see at a glance *which* branch needed extra retreat.
+        mults = repair.get("multipliers")
+        if mults is not None:
+          label += f"  [repaired rfac×{list(mults)}]"
+      if overlaps:
+        # Near-degenerate shared edge(s) detected: this bifurcation is
+        # too close to at least one neighbour and is a merge candidate.
+        # List the partner "Bk" labels; a standalone "(term)" annotation
+        # marks overlaps on a terminal edge (no partner bif).
+        partner_labels = [
+          _partner_label(ov.get("other"))
+          if ov.get("other") is not None else "(term)"
+          for ov in overlaps
+        ]
+        label += f"  [merge candidate: {', '.join(partner_labels)}]"
+      item = QListWidgetItem(label)
       item.setData(Qt.ItemDataRole.UserRole, key)
+      # Build tooltip lines in a single list so overlap info can be
+      # appended uniformly regardless of validity/repair branch.
+      tip_lines: list[str] = []
+      if vkey in self._merged_bif_unsigned_keys:
+        tip_lines.append(
+          "This row is the n-furcation after merging the checked merge "
+          "candidate(s); former neighbour rows are folded into this junction."
+        )
+      if validity is False:
+        item.setForeground(QColor(200, 30, 30))
+        tip_lines.append(
+          "Bifurcation hex mesh self-intersects (is_valid() returned "
+          "False). Exporting may still work, but this furcation is "
+          "unlikely to produce a usable volume."
+        )
+        if repair is not None and repair.get("tried") is not None:
+          n_tried = repair.get("attempts", len(repair.get("tried", [])))
+          tip_lines.append(
+            f"\nAutomatic per-branch rfac retry exhausted after "
+            f"{n_tried} attempts. Tried multipliers (in order): "
+            + ", ".join(
+              str(tuple(t.get("multipliers"))) for t in repair.get("tried", [])
+            )
+          )
+      elif validity is True:
+        if repair is not None and repair.get("branch_rfac") is not None:
+          # The bifurcation was rescued by a retry — make the tooltip
+          # explicit about which per-branch rfac values were used so the
+          # user can make it the default if the same topology recurs.
+          br = repair.get("branch_rfac", {})
+          mults = repair.get("multipliers")
+          attempts = repair.get("attempts")
+          score = repair.get("score")
+          baseline_score = repair.get("baseline_score")
+          tip_lines.append(
+            "Bifurcation hex mesh passes is_valid() after automatic "
+            "per-branch rfac scan (best-scoring attempt committed)."
+          )
+          tip_lines.append(f"  multipliers (by branch order): {mults}")
+          tip_lines.append(
+            "  absolute rfac per signed branch id: "
+            + ", ".join(f"{k}→{v:g}" for k, v in br.items())
+          )
+          if attempts is not None:
+            tip_lines.append(f"  attempts scored: {attempts}")
+          if score is not None:
+            # Score layout (see mesh._mesh_quality_score):
+            # (valid_flag, min_scaled_J, min_det_J, mean_scaled_J, mean_det_J)
+            tip_lines.append(
+              f"  quality: min_scaled_J={score[1]:.3e}, "
+              f"min_det_J={score[2]:.3e}, "
+              f"mean_scaled_J={score[3]:.3e}"
+            )
+          if baseline_score is not None and baseline_score[0] == 0:
+            tip_lines.append(
+              f"  baseline failed "
+              f"(min_scaled_J={baseline_score[1]:.3e}, "
+              f"min_det_J={baseline_score[2]:.3e})"
+            )
+        else:
+          tip_lines.append("Bifurcation hex mesh passes is_valid().")
+      if overlaps:
+        tip_lines.append("")  # blank line separator
+        tip_lines.append(
+          "⚠ Close-neighbour detection: this bifurcation shares a "
+          "near-degenerate edge with another bifurcation. The vessel "
+          "stub between them is too short to mesh reliably — consider "
+          "merging into a single n-furcation."
+        )
+        for ov in overlaps:
+          partner = (
+            _partner_label(ov.get("other"))
+            if ov.get("other") is not None else "terminal end"
+          )
+          tip_lines.append(
+            f"  shared edge id {ov['iedge']} ↔ {partner}: "
+            f"remaining span = {ov['remaining_fraction']:.1%} of full xi"
+          )
+      if tip_lines:
+        item.setToolTip("\n".join(tip_lines))
       self.bif_list.addItem(item)
+
+    if not self._bif_validity:
+      self.bif_list_invalid_only.blockSignals(True)
+      self.bif_list_invalid_only.setChecked(False)
+      self.bif_list_invalid_only.blockSignals(False)
+    self.bif_list_invalid_only.setEnabled(bool(self._bif_validity))
+
+    sel_key = self._selected_bif_key
+    if sel_key is not None:
+      found_row = -1
+      for row in range(self.bif_list.count()):
+        it = self.bif_list.item(row)
+        if it.data(Qt.ItemDataRole.UserRole) == sel_key:
+          found_row = row
+          break
+      if found_row >= 0:
+        self.bif_list.blockSignals(True)
+        self.bif_list.setCurrentRow(found_row)
+        self.bif_list.blockSignals(False)
+      else:
+        self.bif_list.blockSignals(True)
+        self.bif_list.clearSelection()
+        self.bif_list.blockSignals(False)
+        if self.mode.currentText() == "Fix bifurcation":
+          self._persist_current_fix_hits()
+        self._selected_bif_key = None
+        if self.mode.currentText() == "Fix bifurcation":
+          self._sync_fix_hits_from_storage()
+          self._update_fix_hint()
+
+  def _on_bif_invalid_filter_toggled(self, _checked=False):
+    self._fill_bif_list()
+    mode = self.mode.currentText()
+    if mode == "Bifurcations":
+      self._render_mode(preserve_camera=True)
+    elif mode == "Fix bifurcation":
+      self._render_fix_mode(preserve_camera=True)
 
   def _fill_add_list(self):
     self.add_list.clear()
@@ -1489,6 +2649,10 @@ class MeshGeneratorWindow(QMainWindow):
         self._render_mode(preserve_camera=True)
         self._set_status(f"Selected bifurcation: {item.text()}")
         return
+    self._set_status(
+      "That bifurcation is hidden: turn off 'List invalid bifurcations only' "
+      "to select it in the list or from 3D."
+    )
 
   def _on_bif_clicked_3d(self, key):
     self._set_status("3D click detected. Selecting nearest bifurcation...")
@@ -1506,14 +2670,28 @@ class MeshGeneratorWindow(QMainWindow):
     cl_id = int(cl_id)
     self._selected_centerline_id = cl_id
     # Move the ID-map cursor to the corresponding row without re-entering this
-    # slot; rows are 0-based but display ids are 1-based.
-    target_row = cl_id - 1
+    # slot. Centerlines mode: rows follow 1-based file order. Fix mode: rows
+    # follow ``_fix_mode_branch_polylines`` / graph edge order.
+    if self.mode.currentText() == "Fix bifurcation":
+      target_row = next(
+        (
+          r for r in range(self.id_map.count())
+          if (d := self.id_map.item(r).data(Qt.ItemDataRole.UserRole + 1))
+          is not None and int(d) == cl_id
+        ),
+        -1,
+      )
+    else:
+      target_row = cl_id - 1
     if 0 <= target_row < self.id_map.count():
       self.id_map.blockSignals(True)
       self.id_map.setCurrentRow(target_row)
       self.id_map.blockSignals(False)
-    if focus_scene and self.mode.currentText() == "Centerlines":
-      self._render_mode(preserve_camera=True)
+    if focus_scene and self.mode.currentText() in ("Centerlines", "Fix bifurcation"):
+      if self.mode.currentText() == "Fix bifurcation":
+        self._render_fix_mode(preserve_camera=True)
+      else:
+        self._render_mode(preserve_camera=True)
 
   def _on_cl_clicked_3d(self, cl_id):
     """3D viewport click on a centerline polyline → select it in the ID map."""
@@ -1521,23 +2699,34 @@ class MeshGeneratorWindow(QMainWindow):
     self._select_centerline_by_id(cl_id, focus_scene=True)
 
   def _on_id_map_item_changed(self, current, _prev):
-    """ID-map row change → highlight that centerline in 3D (Centerlines mode)."""
+    """ID-map row change → highlight that centerline in 3D (Centerlines / Fix modes)."""
     if current is None:
       return
-    if self.mode.currentText() != "Centerlines":
+    mode = self.mode.currentText()
+    if mode not in ("Centerlines", "Fix bifurcation"):
       return
     disp = current.data(Qt.ItemDataRole.UserRole + 1)
     if disp is None:
       return
     self._selected_centerline_id = int(disp)
-    self.scene.draw_centerlines(
-      self._centerlines,
-      selected_id=self._selected_centerline_id,
-      preserve_camera=True,
-    )
+    if mode == "Centerlines":
+      self.scene.draw_centerlines(
+        self._centerlines,
+        selected_id=self._selected_centerline_id,
+        preserve_camera=True,
+      )
+    else:
+      self._render_fix_mode(preserve_camera=True)
 
   def _on_bif_selected_list(self, current, _prev):
+    if self.mode.currentText() == "Fix bifurcation":
+      self._persist_current_fix_hits()
     self._selected_bif_key = None if current is None else current.data(Qt.ItemDataRole.UserRole)
+    if self.mode.currentText() == "Fix bifurcation":
+      self._sync_fix_hits_from_storage()
+      self._update_fix_hint()
+      self._render_fix_mode(preserve_camera=True)
+      return
     if self.mode.currentText() != "Bifurcations":
       self.mode.blockSignals(True)
       self.mode.setCurrentText("Bifurcations")
@@ -1550,7 +2739,16 @@ class MeshGeneratorWindow(QMainWindow):
     if item is None:
       self._set_status("Select a bifurcation first.")
       return
-    self._removed_bif_keys.add(item.data(Qt.ItemDataRole.UserRole))
+    key = item.data(Qt.ItemDataRole.UserRole)
+    vkey = frozenset(abs(int(i)) for i in key)
+    if vkey in self._merged_bif_unsigned_keys:
+      self._set_status(
+        "Cannot delete a merge-produced n-furcation from the list — uncheck "
+        "the merge candidate, Generate mesh to restore separate bifurcations, "
+        "then delete if still needed."
+      )
+      return
+    self._removed_bif_keys.add(key)
     self._selected_bif_key = None
     self._clear_cached_mesh()
     self._refresh()
@@ -1642,6 +2840,12 @@ class MeshGeneratorWindow(QMainWindow):
     """Refresh the 3D scene and ID list for the current ``self.mode``."""
     self.id_map.clear()
     mode = self.mode.currentText()
+    if mode != "Fix bifurcation":
+      self._set_right_panel_fix_mode(False)
+    if mode == "Fix bifurcation":
+      self._update_fix_hint()
+      self._render_fix_mode(preserve_camera=preserve_camera)
+      return
     if mode == "Mesh":
       if self.last_mesh is None:
         self._set_status("No mesh loaded yet. Generate mesh first.")
@@ -1659,13 +2863,20 @@ class MeshGeneratorWindow(QMainWindow):
         self._set_status("Mesh preview: full boundary surface (edges + vertices) + statistics in the Mesh panel.")
       return
     if mode == "Bifurcations":
-      self.scene.draw_bifurcations(self._graph_cache, self._selected_bif_key, preserve_camera=preserve_camera)
+      invalid_keys = frozenset(
+        k for k, v in (self._bif_validity or {}).items() if not v
+      )
+      g_bif = self._graph_for_bif_list_and_3d()
+      self.scene.draw_bifurcations(
+        g_bif, self._selected_bif_key,
+        preserve_camera=preserve_camera, invalid_keys=invalid_keys,
+      )
       for disp, (orig_i, name) in enumerate(self._filenames, start=1):
         it = QListWidgetItem(f"{disp} → {name}")
         it.setData(Qt.ItemDataRole.UserRole, orig_i)
         self.id_map.addItem(it)
       self._set_status(
-        f"Bifurcation view loaded: {len(self._graph_cache.nontrivial_furcations)} nodes. "
+        f"Bifurcation view loaded: {len(g_bif.nontrivial_furcations)} nodes. "
         "List selection shows a large black centroid; unselected furcs are red."
       )
       return
@@ -1694,6 +2905,151 @@ class MeshGeneratorWindow(QMainWindow):
     self.id_map.blockSignals(False)
     self._set_status(f"Centerline view loaded: {len(self._centerlines)} lines.")
 
+  def _render_fix_mode(self, preserve_camera=False):
+    """3D: vascular-graph vessels (as in Bifurcations), mesh overlay, branch picks."""
+    self._set_right_panel_fix_mode(True)
+    self.id_map.clear()
+    folder = self.csv_edit.text().strip()
+    if not folder or not os.path.isdir(folder):
+      self._set_status("Select a valid CSV folder.")
+      return
+    branches = self._fix_mode_branch_polylines()
+    valid_ids = {int(i) for i, _ in branches}
+    if self._selected_centerline_id not in valid_ids:
+      self._selected_centerline_id = None
+    show_mesh = self.fix_show_mesh.isChecked() and self.last_mesh is not None
+    self.scene.draw_fix_view(
+      branches,
+      selected_id=self._selected_centerline_id,
+      border_points=self._all_fix_anchor_xyz_for_draw(),
+      fix_bif_ref=self._fix_mode_selected_bif_reference(),
+      show_mesh=show_mesh,
+      mesh=self.last_mesh,
+      preview_points=self._mesh_preview_points,
+      boundary_wire=self._mesh_preview_boundary_wire,
+      boundary_scatter=self._mesh_preview_boundary_scatter,
+      boundary_faces=self._mesh_preview_boundary_faces,
+      preserve_camera=preserve_camera,
+    )
+    self.id_map.blockSignals(True)
+    for idx, pts in branches:
+      arc = float(np.sum(np.linalg.norm(np.diff(pts, axis=0), axis=1)))
+      it = QListWidgetItem(f"Edge {idx} · polyline L≈{arc:.5g}")
+      it.setData(Qt.ItemDataRole.UserRole, int(idx))
+      it.setData(Qt.ItemDataRole.UserRole + 1, int(idx))
+      self.id_map.addItem(it)
+    if self._selected_centerline_id is not None:
+      for row in range(self.id_map.count()):
+        it = self.id_map.item(row)
+        d = it.data(Qt.ItemDataRole.UserRole + 1)
+        if d is not None and int(d) == int(self._selected_centerline_id):
+          self.id_map.setCurrentRow(row)
+          break
+    self.id_map.blockSignals(False)
+    n_need = len(self._selected_bif_key) if self._selected_bif_key is not None else 0
+    n_hit = len(self._fix_border_hits)
+    self._set_status(
+      f"Fix bifurcation: bif-view vessels + {'mesh' if show_mesh else 'mesh hidden'}; "
+      f"branch picks {n_hit}/{max(n_need, 1)}."
+    )
+
+  def _update_fix_hint(self):
+    if self._selected_bif_key is None:
+      n_queued = len(self._complete_fix_anchor_specs())
+      qtxt = (
+        f"{n_queued} bifurcation(s) have full anchors queued for the next mesh."
+        if n_queued
+        else ""
+      )
+      self.fix_hint.setText(
+        "Select a bifurcation in the Bifurcations list (left), then click each "
+        "incident vessel in 3D — the same polylines as Bifurcations mode "
+        "(split/merged graph), not raw CSV lines. "
+        "Amber: **baseline** vessel↔bif cut (Mesh **Truncation rfac** / "
+        "**Refinement**) on the spline — ignores queued green picks until "
+        "**Generate mesh**. **Green** = your trim targets on the polylines. "
+        "Esc clears picks for the selected bif only. Completed anchors stay queued "
+        "across successful mesh runs until you use “Clear all fix anchors”. "
+        "Toggle mesh overlay as needed."
+        + (f" {qtxt}" if qtxt else "")
+      )
+      return
+    abs_e = sorted({abs(int(i)) for i in self._selected_bif_key})
+    n = len(self._selected_bif_key)
+    n_queued = len(self._complete_fix_anchor_specs())
+    qtxt = (
+      f" {n_queued} bifurcation(s) have full anchors and will trim together on Generate."
+      if n_queued
+      else ""
+    )
+    self.fix_hint.setText(
+      f"Target bif — unsigned edges {abs_e}. Record one click per branch "
+      f"({len(self._fix_border_hits)}/{n}). "
+      f"Amber = baseline **rfac** cut (ignores green until Generate); "
+      f"green = closest point on the **displayed** polyline to your click. "
+      f"{qtxt}"
+    )
+
+  def _clear_fix_picks(self):
+    if self._selected_bif_key is not None:
+      self._fix_anchors_by_bif.pop(self._selected_bif_key, None)
+    self._fix_border_hits = []
+    self._update_fix_hint()
+    if self.mode.currentText() == "Fix bifurcation":
+      self._render_fix_mode(preserve_camera=True)
+
+  def _clear_all_fix_anchors(self):
+    self._fix_anchors_by_bif.clear()
+    self._fix_border_hits = []
+    self._update_fix_hint()
+    if self.mode.currentText() == "Fix bifurcation":
+      self._render_fix_mode(preserve_camera=True)
+
+  def _on_fix_show_mesh_toggled(self, _checked=False):
+    if self.mode.currentText() != "Fix bifurcation":
+      return
+    self._render_fix_mode(preserve_camera=True)
+
+  def _on_fix_border_pick(self, cl_id, xyz):
+    if self._selected_bif_key is None:
+      self._set_status("Fix bifurcation: select a bifurcation in the list first.")
+      return
+    allowed = {abs(int(i)) for i in self._selected_bif_key}
+    eid = int(cl_id)
+    if eid not in allowed:
+      self._set_status(
+        f"That vessel edge (id {eid}) is not incident to the selected bifurcation; "
+        f"pick one of {sorted(allowed)}."
+      )
+      return
+    n = len(self._selected_bif_key)
+    picked_edges = {abs(int(p[0])) for p in self._fix_border_hits}
+    if eid in picked_edges:
+      self._set_status(f"Vessel edge {eid} already has an anchor — Clear branch picks to redo.")
+      return
+    if len(self._fix_border_hits) >= n:
+      self._set_status(
+        f"Already have {n} anchors (full). Clear branch picks to change them."
+      )
+      return
+    self._fix_border_hits.append((eid, np.asarray(xyz, dtype=float).ravel()[:3].copy()))
+    self._persist_current_fix_hits()
+    self._update_fix_hint()
+    self._render_fix_mode(preserve_camera=True)
+    if len(self._fix_border_hits) == n:
+      coords = "; ".join(
+        f"e{eid}→({p[0]:.4g},{p[1]:.4g},{p[2]:.4g})"
+        for eid, p in self._fix_border_hits
+      )
+      self._set_status(
+        f"All {n} branch anchors recorded — click Generate mesh to trim vessels "
+        f"at those points and rebuild. ({coords})"
+      )
+    else:
+      self._set_status(
+        f"Branch anchor {len(self._fix_border_hits)}/{n} on edge {eid}."
+      )
+
   def _generate_export_open(self):
     """Start :class:`MeshComputeThread` with a snapshot of current UI parameters."""
     if self._mesh_thread is not None and self._mesh_thread.isRunning():
@@ -1708,12 +3064,33 @@ class MeshGeneratorWindow(QMainWindow):
       section_points += 1
       self.mesh_section_points.setValue(section_points)
       self._set_status("Section points must be even; rounded up by 1.")
+    # Resolve opt-in merges: map each checked component id back to the
+    # tuple-of-tuples of its constituent unsigned-index bif keys.  This is
+    # the shape ``generate_mesh`` → ``make_spline_mesh`` expects.
+    opt_in_components = self._opt_in_components_from_ui()
+    # After a merged mesh, overlap detection often returns no merge rows; the
+    # checkbox list is rebuilt from ``_last_merge_opt_in`` synthetically, but
+    # ``_opt_in_components_from_ui`` can still be empty if component_id /
+    # panel state glitches.  Do **not** run ``generate_mesh`` without merges
+    # while the user still has merge opt-ins checked — that drops the merged
+    # topology and fix-anchor bif keys no longer match ``apply_merge``.
+    if (
+      not opt_in_components
+      and self._last_merge_opt_in
+      and self._merge_opt_in
+    ):
+      opt_in_components = [
+        tuple(tuple(int(i) for i in k) for k in comp)
+        for comp in self._last_merge_opt_in
+      ]
+    self._persist_current_fix_hits()
+    fix_anchor_specs = self._complete_fix_anchor_specs()
+    self._pending_fix_anchor_mesh = bool(fix_anchor_specs)
     kw = dict(
       csv_folder=folder,
       split_eps=self.split_eps.value(),
       merge_eps=self.merge_eps.value(),
       use_merge=self.use_merge.isChecked(),
-      spline_points=self.spline_points.value(),
       mesh_dx=self.mesh_dx.value(),
       mesh_nref=self.mesh_nref.value(),
       mesh_rfac=self.mesh_rfac.value(),
@@ -1724,18 +3101,105 @@ class MeshGeneratorWindow(QMainWindow):
       removed_keys=set(self._removed_bif_keys),
       manual_additions=list(self._manual_additions),
       removed_centerline_ids=frozenset(self._removed_centerline_ids),
+      merge_opt_in=opt_in_components,
+      fix_anchor_specs=tuple(fix_anchor_specs),
     )
+    # Never overwrite a non-empty merge snapshot with ``()`` when this click
+    # failed to resolve components — that breaks the next fallback.  Clear
+    # only when the user has unchecked every merge checkbox.
+    if opt_in_components:
+      self._last_merge_opt_in = tuple(
+        tuple(tuple(int(i) for i in k) for k in comp)
+        for comp in opt_in_components
+      )
+    elif not self._merge_opt_in:
+      self._last_merge_opt_in = ()
 
     def work():
       mesh = generate_mesh(**kw)
       bpts = _extract_boundary_points_for_preview(mesh)
       stats = mesh_statistics(mesh)
       bwire, bscatter, bfaces = _boundary_preview_arrays(mesh)
-      return mesh, bpts, stats, bwire, bscatter, bfaces
+      # Per-bifurcation validity is attached by ``make_spline_mesh`` as
+      # ``mesh.bif_validity = ((key, bool, repair_or_None), ...)`` (older
+      # builds emit 2-tuples without the repair slot).  Normalise to a dict
+      # ``{frozenset_key: {"valid": bool, "repair": dict | None}}`` — the
+      # richer value lets the bif list show *why* a bifurcation is
+      # still red (no cascade entry worked) or reassure the user which
+      # per-branch rfac combination fixed it.
+      raw = getattr(mesh, "bif_validity", ())
+      bvalid: dict = {}
+      for entry in raw:
+        if len(entry) == 2:
+          k, v = entry
+          repair = None
+        else:
+          k, v, repair = entry[0], entry[1], entry[2] if len(entry) > 2 else None
+        bvalid[frozenset(int(i) for i in k)] = {
+          "valid": bool(v),
+          "repair": repair,
+          "overlaps": [],
+        }
+      # Per-edge overlap detection from ``make_spline_mesh``: edges where
+      # the two adjacent bifurcations are so close that ``rtruncate`` had
+      # to clamp the vessel stub between them — merge candidates for a
+      # single n-furcation.  Fold the info into the per-bif dict so every
+      # offending bif shows its partner(s) in the list tooltip.
+      for ov in getattr(mesh, "bif_overlaps", ()):
+        bs = ov.get("bif_start")
+        be = ov.get("bif_end")
+        if bs is None or be is None:
+          # Terminal edge — no partner bif.  Still worth recording on the
+          # single attached bif so the user sees the short-stub warning.
+          attached = bs or be
+          if attached is None:
+            continue
+          bvalid.setdefault(attached, {
+            "valid": True, "repair": None, "overlaps": [],
+          })["overlaps"].append({
+            "iedge": int(ov["iedge"]),
+            "remaining_fraction": float(ov["remaining_fraction"]),
+            "other": None,
+          })
+          continue
+        info = {
+          "iedge": int(ov["iedge"]),
+          "remaining_fraction": float(ov["remaining_fraction"]),
+        }
+        bvalid.setdefault(bs, {
+          "valid": True, "repair": None, "overlaps": [],
+        })["overlaps"].append({**info, "other": be})
+        bvalid.setdefault(be, {
+          "valid": True, "repair": None, "overlaps": [],
+        })["overlaps"].append({**info, "other": bs})
+      # Connected components of the merge-candidate graph — one checkbox
+      # per component gets rendered at the top of the Bifurcations panel.
+      # Each item is a plain dict so it survives signal marshalling
+      # untouched; sets/frozensets in the items are already hashable and
+      # picklable.
+      components_raw = getattr(mesh, "merge_components", ()) or ()
+      merge_components = [
+        {
+          "component_id": comp["component_id"],
+          "bif_keys": tuple(
+            frozenset(int(i) for i in k) for k in comp["bif_keys"]
+          ),
+          "internal_edges": tuple(sorted(int(i) for i in comp["internal_edges"])),
+        }
+        for comp in components_raw
+      ]
+      return mesh, bpts, stats, bwire, bscatter, bfaces, bvalid, merge_components
 
     self.b_gen.setEnabled(False)
     self.b_stop_gen.setEnabled(True)
-    self._set_status("Generating mesh in background… You can keep using the window.")
+    if self._pending_fix_anchor_mesh:
+      nfa = len(fix_anchor_specs)
+      self._set_status(
+        "Generating mesh (Fix bifurcation anchor(s) on "
+        f"{nfa} junction(s); no rfac repair scan on this run…"
+      )
+    else:
+      self._set_status("Generating mesh in background… You can keep using the window.")
     QApplication.processEvents()
     th = MeshComputeThread(work)
     self._mesh_thread = th
@@ -1744,21 +3208,124 @@ class MeshGeneratorWindow(QMainWindow):
     th.finished.connect(self._on_mesh_thread_finished)
     th.start()
 
-  def _on_mesh_thread_ok(self, mesh, bpts, stats, bwire, bscatter, bfaces):
+  def _on_mesh_thread_ok(self, mesh, bpts, stats, bwire, bscatter, bfaces,
+                         bvalid, merge_components=()):
+    applied_fix_anchors = self._pending_fix_anchor_mesh
     self.last_mesh = mesh
     self._mesh_preview_points = bpts
     self._mesh_preview_boundary_wire = bwire
     self._mesh_preview_boundary_scatter = bscatter
     self._mesh_preview_boundary_faces = bfaces
+    # ``bvalid`` from the worker is now a dict of dicts with three slots:
+    # ``{"valid": bool, "repair": info | None, "overlaps": list}``.  Split
+    # into three flat dicts so all downstream code that expects plain
+    # booleans keeps working unchanged; repair and overlap info are shown
+    # separately in the list tooltip / status line.
+    self._bif_validity = {k: bool(entry["valid"]) for k, entry in (bvalid or {}).items()}
+    self._bif_repair = {k: entry.get("repair") for k, entry in (bvalid or {}).items()}
+    self._bif_overlaps = {
+      k: list(entry.get("overlaps") or [])
+      for k, entry in (bvalid or {}).items()
+    }
+    if applied_fix_anchors:
+      # Keep ``_fix_anchors_by_bif`` so later Generate clicks still apply **all**
+      # completed junction trims (e.g. fix bif A, mesh OK, then fix bif B — A must
+      # stay in the dict).  Clear only the in-memory row; resync from storage.
+      self._fix_border_hits = []
+      self._sync_fix_hits_from_storage()
+      self._pending_fix_anchor_mesh = False
+      self._update_fix_hint()
+    # Connected-component list: one checkbox per entry at the top of the
+    # Bifurcations panel.  ``bif_keys`` arrives as a tuple of frozensets
+    # (already picklable), but normalise once here so downstream code can
+    # assume a stable shape.
+    raw_merge = merge_components or ()
+    if not raw_merge and self._last_merge_opt_in:
+      raw_merge = self._synthetic_merge_components_from_last_opt_in()
+      # Overlap detection often disappears after a merge, so the worker sends
+      # no ``merge_components``; the checkbox row would be empty and
+      # ``_merge_opt_in`` could have been cleared.  Re-queue the same merge for
+      # the next Generate unless the user explicitly unchecks it.
+      for c in raw_merge:
+        self._merge_opt_in.add(c["component_id"])
+    self._merge_components = [
+      {
+        "component_id": c["component_id"],
+        "bif_keys": tuple(frozenset(int(i) for i in k) for k in c["bif_keys"]),
+        "internal_edges": tuple(int(i) for i in c["internal_edges"]),
+      }
+      for c in raw_merge
+    ]
+    self._rebuild_graph_for_bif_ui(self._last_merge_opt_in)
     self._set_mesh_stats(stats)
+    # Rebuild the checkbox row first so the subsequent bif-list refresh
+    # sees the current opt-in state and its status-bar sentence (added by
+    # ``_on_merge_checkbox_toggled``) doesn't get clobbered.
+    self._fill_merge_checkboxes()
+    # Refresh the bifurcation list so invalid bifs turn red on the same
+    # pass, even if we stay in Centerlines / Mesh view.
+    self._fill_bif_list()
     if self.mode.currentText() != "Mesh":
       self.mode.blockSignals(True)
       self.mode.setCurrentText("Mesh")
       self.mode.blockSignals(False)
     self._render_mode()
-    self._set_status("Mesh generated. Full boundary preview + statistics below.")
+    n_total = len(self._bif_validity)
+    n_bad = sum(1 for v in self._bif_validity.values() if not v)
+    # A "repaired" bif: originally failed validity but was rescued by the
+    # per-branch rfac retry cascade.  Surface this count in the status so
+    # the user immediately sees *how much* of the mesh needed repair, not
+    # just the final good/bad split.
+    n_repaired = sum(
+      1
+      for k, v in self._bif_validity.items()
+      if v and (self._bif_repair or {}).get(k) is not None
+      and (self._bif_repair or {}).get(k, {}).get("branch_rfac") is not None
+    )
+    # Merge-candidate count: number of *distinct* bifurcations that share
+    # a near-degenerate edge with another (counted per bif, not per pair
+    # — a bif that overlaps with two neighbours counts as one).
+    n_merge_candidates = sum(
+      1 for lst in (self._bif_overlaps or {}).values() if lst
+    )
+    if n_total == 0:
+      tail = ""
+    elif n_bad == 0 and n_repaired == 0:
+      tail = f" All {n_total} bifurcations valid."
+    elif n_bad == 0 and n_repaired > 0:
+      tail = (
+        f" All {n_total} bifurcations valid — "
+        f"{n_repaired} rescued by per-branch rfac scan "
+        "(see Bifurcations list tooltips for the multipliers)."
+      )
+    else:
+      extra = (
+        f", {n_repaired} rescued by per-branch rfac scan"
+        if n_repaired else ""
+      )
+      tail = (
+        f" {n_bad} of {n_total} bifurcations self-intersect{extra} — "
+        "marked in red in the Bifurcations list / view."
+      )
+    if n_merge_candidates:
+      tail += (
+        f"  {n_merge_candidates} merge candidate(s) detected "
+        "(two bifurcations too close to fit a vessel between them — "
+        "see Bifurcations list tooltip)."
+      )
+    anchor_tail = (
+      "  Fix bifurcation anchors were applied; automatic per-bif rfac repair was "
+      "skipped for this run (baseline truncations only). "
+      "Completed junction anchors stay queued for the next Generate until you "
+      "clear them (per-bif or “Clear all fix anchors”)."
+      if applied_fix_anchors else ""
+    )
+    self._set_status(
+      "Mesh generated. Full boundary preview + statistics below." + tail + anchor_tail
+    )
 
   def _on_mesh_thread_err(self, tb):
+    self._pending_fix_anchor_mesh = False
     self._set_status(f"Generation error: {tb.strip().splitlines()[-1]}")
 
   def _on_mesh_thread_finished(self):
@@ -1779,6 +3346,17 @@ class MeshGeneratorWindow(QMainWindow):
     # Use terminate as an emergency stop from the GUI.
     self._mesh_thread.terminate()
     self._mesh_thread.wait(5000)
+
+  def keyPressEvent(self, event):
+    if (
+      event.key() == Qt.Key.Key_Escape
+      and self.mode.currentText() == "Fix bifurcation"
+      and self._fix_border_hits
+    ):
+      self._clear_fix_picks()
+      event.accept()
+      return
+    super().keyPressEvent(event)
 
   def closeEvent(self, event):
     """Block exit until the mesh worker finishes (avoids tearing down mid-build)."""

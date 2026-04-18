@@ -312,13 +312,45 @@ class VascularGraph(EdgeGraph):
     if rfac == 0: return self
     return self.truncate_edges(self._rtruncate(rfac))
 
-  def to_spline_graph(self, npoints, **fitkwargs):
+  def to_spline_graph(self, npoints=None, dx=None, spline_nmax: int = 500,
+                      **fitkwargs):
     """
     Convert the vascular graph to a spline graph.
+
+    Parameters
+    ----------
+    npoints
+      If given (and ``dx`` is omitted), every edge uses this same integer
+      knot-interval count for :meth:`edge.VascularEdge.to_spline_edge`.
+    dx
+      If given, each edge uses ``max(2, int(length / dx))`` intervals (the
+      same longitudinal resolution rule as volumetric meshing in
+      :func:`partery.mesh.make_spline_mesh`), capped at ``spline_nmax``.
+    spline_nmax
+      Upper cap on per-edge interval count when ``dx`` is used (avoids
+      enormous spline DOFs on very long vessels).
+
+    Exactly one of ``npoints`` or ``dx`` must be provided.
     """
     from sgraph import SplineGraph
+    if dx is not None:
+      if npoints is not None:
+        raise TypeError("Pass only one of npoints= or dx= to to_spline_graph.")
+      dx = float(dx)
+      assert dx > 0, "dx must be positive."
+      spline_nmax = int(spline_nmax)
+      assert spline_nmax >= 2, "spline_nmax must be at least 2."
+      edges = []
+      for edge in self.edges:
+        n = max(2, int(edge.length / dx))
+        n = min(n, spline_nmax)
+        edges.append(edge.to_spline_edge(n, **fitkwargs))
+      return SplineGraph(self.indices, edges, self.furcations)
+    if npoints is None:
+      raise TypeError("to_spline_graph requires npoints= or dx=.")
     return SplineGraph(self.indices,
-                       [edge.to_spline_edge(npoints, **fitkwargs) for edge in self.edges],
+                       [edge.to_spline_edge(npoints, **fitkwargs)
+                        for edge in self.edges],
                        self.furcations)
 
 

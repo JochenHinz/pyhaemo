@@ -113,36 +113,67 @@ def merge_furcs_proximity(graph, eps=1e-5):
 
 
 @njit(cache=True)
-def find_distance(points0, points1, r0, r1, centroid, rfac=2):
-  n0, n1 = len(points0), len(points1)
+def _find_distance_core(points0, points1, r0, r1, centroid, rfac0, rfac1):
+  """Numba-compiled core of :func:`find_distance` with two scalar rfacs.
 
+  Split out so the JIT has a single concrete signature (numba rejects unions
+  like ``float | tuple`` in nopython mode).  The Python-level
+  :func:`find_distance` wrapper handles scalar/tuple input dispatching.
+
+  Walks the two branch polylines toward the furcation until each endpoint is
+  more than ``rfac_k · r_k`` from the centroid and the two endpoints are at
+  least ``max(rfac_0 · r_0, rfac_1 · r_1)`` apart.
+  """
+  n0, n1 = len(points0), len(points1)
   i, j, success = 0, 0, True
 
   while i < n0 and j < n1:
     p0, p1 = points0[i], points1[j]
-    maxr = max(r0[i], r1[j])
+    # Per-branch scaled radii: each branch must retreat to at least
+    # rfac_k · r_k from the centroid; for the pair-separation test we
+    # need a shared threshold so take the larger of the two.
+    sep0 = rfac0 * r0[i]
+    sep1 = rfac1 * r1[j]
+    sep_max = max(sep0, sep1)
 
     dist = np.linalg.norm(p0 - p1)
-    if dist < rfac * maxr:
+    if dist < sep_max:
       i += 1
       j += 1
       continue
 
     distance_center = ((np.stack((p0, p1), axis=0) - centroid)**2).sum(-1)**.5
 
-    if (distance_center > rfac * maxr).all():
+    if distance_center[0] > sep0 and distance_center[1] > sep1:
       break
 
-    if distance_center[0] < rfac * maxr:
+    if distance_center[0] < sep0:
       i = i + 1
 
-    if distance_center[1] < rfac * maxr:
+    if distance_center[1] < sep1:
       j = j + 1
 
   else:
     i, j, success = 0, 0, False
 
   return i, j, success
+
+
+def find_distance(points0, points1, r0, r1, centroid, rfac=2):
+  """Walk the two branch polylines toward the furcation until both endpoints
+  clear their per-branch pullback threshold.  Thin Python wrapper around
+  :func:`_find_distance_core`; accepts ``rfac`` as either a scalar (applied
+  to both branches) or a ``(rfac0, rfac1)`` pair.  Asymmetric values make
+  each branch pull back by its own multiplier of its own local radius —
+  used by the per-branch retry loop in :func:`rtruncate_per_branch` when
+  one branch of a failing bifurcation needs to retreat further than the
+  others.
+  """
+  if isinstance(rfac, (tuple, list, np.ndarray)):
+    rfac0, rfac1 = float(rfac[0]), float(rfac[1])
+  else:
+    rfac0 = rfac1 = float(rfac)
+  return _find_distance_core(points0, points1, r0, r1, centroid, rfac0, rfac1)
 
 
 def rtruncate(graph, rfac=2):
@@ -186,6 +217,80 @@ def rtruncate(graph, rfac=2):
     if _vals[0] >= _vals[1]:
       npoints_2 = edge.npoints // 2
       log.warning(f'Found invalid truncation indices {vals} for edge with index {key}.')
+      truncate_dict[key] = [npoints_2 - 1, npoints_2 + 1]
+
+  return truncate_dict
+
+
+def rtruncate_per_branch(graph, rfac_default=2, branch_overrides=None):
+  """Like :func:`rtruncate`, but with **per-branch** ``rfac`` overrides.
+
+  ``branch_overrides`` is an optional mapping ``{signed_branch_id: rfac}``.
+  Signed ids match ``furc.indices`` (positive/negative = branch direction into
+  the furcation), so the caller can pull back one branch of a failing
+  bifurcation further than the other two without touching their truncation.
+
+  Pairs where at least one side has an override use the asymmetric
+  ``find_distance(..., rfac=(r0, r1))`` path; pairs without overrides behave
+  exactly like :func:`rtruncate` with the single ``rfac_default`` multiplier.
+
+  Returns the same ``{iedge: [start_index_or_None, end_index_or_None]}``
+  format so the downstream pipeline (``VascularGraph.truncate_edges`` /
+  ``SplineGraph.truncate_edges``) is unchanged.
+  """
+  overrides = dict(branch_overrides or {})
+  truncate_dict = {}
+
+  for furc in graph.nontrivial_furcations:
+    centroid = furc.centroid
+
+    myparams = {}
+    for pair in combinations(furc.indices, 2):
+      # Per-branch multipliers: default to rfac_default on each side.
+      r0 = float(overrides.get(pair[0], rfac_default))
+      r1 = float(overrides.get(pair[1], rfac_default))
+      # We still keep the global shrink-on-failure safety net from rtruncate:
+      # if find_distance fails, halve both sides uniformly until it converges
+      # or we drop below 10% of the user-requested value.
+      r0_try, r1_try = r0, r1
+      success = False
+      while not success:
+        if r0_try < r0 / 10 or r1_try < r1 / 10:
+          raise ValueError(
+            f'Could not find indices for furcation {furc} with centroid '
+            f'{centroid} (per-branch rfac={r0}, {r1}).'
+          )
+        e0, e1 = graph.get_edges([-i for i in pair])
+        *indices, success = find_distance(
+          e0.cpoints, e1.cpoints, e0.radii, e1.radii, centroid,
+          rfac=(r0_try, r1_try),
+        )
+        if success is False:
+          log.warning(
+            f'No indices found for edge pair {pair} (rfac={r0_try}, {r1_try})'
+          )
+          r0_try *= 0.5
+          r1_try *= 0.5
+          log.warning(f'Trying again with rfac=({r0_try}, {r1_try})')
+        else:
+          for k, lindex in zip(pair, indices):
+            myparams.setdefault(k, []).append(lindex if k < 0 else -lindex - 1)
+          break
+
+    for k, params in myparams.items():
+      truncate_dict.setdefault(abs(k), [None, None])[0 if k < 0 else 1] = max(params)
+
+  for key, vals in truncate_dict.items():
+    if any(val is None for val in vals):
+      continue
+    edge, = graph.get_edges(key)
+    _vals = [val % edge.npoints for val in vals]
+    if _vals[0] >= _vals[1]:
+      npoints_2 = edge.npoints // 2
+      log.warning(
+        f'Found invalid per-branch truncation indices {vals} for edge with '
+        f'index {key}; falling back to midpoint window.'
+      )
       truncate_dict[key] = [npoints_2 - 1, npoints_2 + 1]
 
   return truncate_dict
