@@ -23,18 +23,27 @@ view and left panel track window height. The left column wraps **Input**,
 :class:`~PyQt6.QtWidgets.QScrollArea` so short windows scroll instead of clipping
 widgets; the status line sits **below** the scroll area and stays visible.
 """
+import multiprocessing as mp
 import os
+import queue as _queue_mod
+import signal as _signal
 import sys
+
+# Prefer the pyhaemo sources next to this repo over an older pip install.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT not in sys.path:
+  sys.path.insert(0, _REPO_ROOT)
 import time
 import traceback
 from datetime import datetime
 from functools import lru_cache
 
 import numpy as np
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QRect
+from PyQt6.QtCore import Qt, QObject, QThread, QTimer, pyqtSignal, QRect
 from PyQt6.QtGui import QColor, QFont, QVector4D, QPixmap, QIcon
 from PyQt6.QtWidgets import (
   QApplication,
+  QButtonGroup,
   QCheckBox,
   QComboBox,
   QDoubleSpinBox,
@@ -48,6 +57,7 @@ from PyQt6.QtWidgets import (
   QListWidget,
   QListWidgetItem,
   QMainWindow,
+  QProgressBar,
   QPushButton,
   QRubberBand,
   QScrollArea,
@@ -56,6 +66,8 @@ from PyQt6.QtWidgets import (
   QSplashScreen,
   QSpinBox,
   QSplitter,
+  QStyle,
+  QToolButton,
   QVBoxLayout,
   QWidget,
 )
@@ -145,6 +157,65 @@ def _resolve_logo_path(kind: str = "logotipo"):
     if os.path.isfile(path):
       return path
   return None
+
+
+def _crop_logo_pixmap(pix, near_white_thresh: int = 240, padding_px: int = 6):
+  """Crop transparent / near-white padding around a logo pixmap.
+
+  Scans the image bytes once via :class:`PyQt6.QtGui.QImage.constBits` so
+  we don't take a per-pixel Python loop, and returns a ``QPixmap`` showing
+  only the bounding box of non-padding pixels (plus a small ``padding_px``
+  margin so the artwork doesn't touch the label edge).
+
+  A pixel is considered "padding" if any of:
+    * its alpha is ``0`` (fully transparent), or
+    * its RGB channels are all ``>= near_white_thresh`` (near-white).
+
+  Returns the original pixmap unchanged if the scan fails or yields an
+  empty / degenerate bounding box, so the call site can stay
+  unconditional.
+  """
+  try:
+    img = pix.toImage()
+    # Ensure a known channel order so ``constBits`` is meaningful.
+    from PyQt6.QtGui import QImage
+    if img.format() != QImage.Format.Format_ARGB32:
+      img = img.convertToFormat(QImage.Format.Format_ARGB32)
+    w = img.width()
+    h = img.height()
+    if w <= 0 or h <= 0:
+      return pix
+    bpl = img.bytesPerLine()
+    buf = img.constBits()
+    buf.setsize(bpl * h)
+    arr = np.frombuffer(buf, dtype=np.uint8).reshape(h, bpl)
+    # Format_ARGB32 stores pixels little-endian as B, G, R, A per 4 bytes.
+    px = arr[:, : w * 4].reshape(h, w, 4)
+    b = px[:, :, 0]
+    g = px[:, :, 1]
+    r = px[:, :, 2]
+    a = px[:, :, 3]
+    is_padding = (a == 0) | (
+      (r >= near_white_thresh) & (g >= near_white_thresh) & (b >= near_white_thresh)
+    )
+    is_content = ~is_padding
+    if not is_content.any():
+      return pix
+    rows = np.where(is_content.any(axis=1))[0]
+    cols = np.where(is_content.any(axis=0))[0]
+    y0, y1 = int(rows.min()), int(rows.max()) + 1
+    x0, x1 = int(cols.min()), int(cols.max()) + 1
+    # Re-add a small margin so the artwork doesn't sit flush with the
+    # cropped edges (avoids the eye reading the crop as an accidental cut).
+    y0 = max(0, y0 - padding_px)
+    x0 = max(0, x0 - padding_px)
+    y1 = min(h, y1 + padding_px)
+    x1 = min(w, x1 + padding_px)
+    if (x1 - x0) < 4 or (y1 - y0) < 4:
+      return pix
+    return pix.copy(int(x0), int(y0), int(x1 - x0), int(y1 - y0))
+  except Exception:
+    return pix
 
 
 def _full_boundary_wireframe_positions(volume_points, boundary_elements, nverts):
@@ -350,6 +421,174 @@ def is_mesh_valid(mesh) -> bool:
   return bool(mesh.is_valid())
 
 
+# --- Application stylesheet -------------------------------------------------
+# Flat, modern look that drops QGroupBox borders, keeps the title as a bold
+# section header, and softens default Qt widget chrome.  Applied at the
+# MeshGeneratorWindow level so it doesn't leak into dialogs.
+APP_STYLESHEET = """
+QMainWindow, QScrollArea, QScrollArea > QWidget > QWidget {
+    background-color: #fafafa;
+}
+QWidget#sectionContainer {
+    background-color: #fafafa;
+}
+QGroupBox {
+    border: none;
+    margin-top: 14px;
+    padding-top: 10px;
+    font-weight: 700;
+    color: #1a1a1a;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 0px;
+    padding: 0 0 4px 0;
+    color: #1a1a1a;
+}
+QGroupBox#topSection {
+    border: 1px solid #b8c2d0;
+    border-radius: 8px;
+    background-color: #ffffff;
+    margin-top: 22px;
+    padding: 16px 14px 12px 14px;
+    font-size: 11pt;
+    font-weight: 700;
+}
+QGroupBox#topSection::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 12px;
+    top: 0px;
+    padding: 2px 10px 2px 10px;
+    background-color: #e8eef7;
+    border: 1px solid #b8c2d0;
+    border-radius: 4px;
+    color: #1a3f7a;
+    font-weight: 700;
+}
+QGroupBox#subSection {
+    margin-top: 10px;
+    padding-top: 6px;
+    font-weight: 600;
+    border-top: 1px dashed #d6dbe2;
+}
+QLabel#subSectionLabel {
+    font-weight: 600;
+    color: #2a2a2a;
+}
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+    background-color: #ffffff;
+    border: 1px solid #c8c8c8;
+    border-radius: 3px;
+    padding: 2px 4px;
+    selection-background-color: #4a90e2;
+    selection-color: #ffffff;
+}
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
+    border-color: #4a90e2;
+}
+QListWidget {
+    background-color: #ffffff;
+    border: 1px solid #c8c8c8;
+    border-radius: 3px;
+}
+QListWidget::item:selected {
+    background-color: #4a90e2;
+    color: #ffffff;
+}
+QPushButton {
+    background-color: #efefef;
+    border: 1px solid #c0c0c0;
+    border-radius: 3px;
+    padding: 4px 10px;
+    color: #1a1a1a;
+}
+QPushButton:hover {
+    background-color: #e3e3e3;
+}
+QPushButton:pressed {
+    background-color: #d4d4d4;
+}
+QPushButton:disabled {
+    color: #9a9a9a;
+    background-color: #f3f3f3;
+    border-color: #d6d6d6;
+}
+QPushButton#viewSegLeft, QPushButton#viewSegMid, QPushButton#viewSegRight {
+    background-color: #f3f3f3;
+    border: 1px solid #c0c0c0;
+    border-radius: 0px;
+    padding: 5px 18px;
+    min-width: 96px;
+    color: #1a1a1a;
+}
+QPushButton#viewSegLeft:hover, QPushButton#viewSegMid:hover, QPushButton#viewSegRight:hover {
+    background-color: #e6e6e6;
+}
+QPushButton#viewSegLeft:checked, QPushButton#viewSegMid:checked, QPushButton#viewSegRight:checked {
+    background-color: #b9b9b9;
+    border-color: #888888;
+    font-weight: 600;
+}
+QPushButton#viewSegLeft {
+    border-top-left-radius: 4px;
+    border-bottom-left-radius: 4px;
+}
+QPushButton#viewSegMid {
+    border-left: none;
+}
+QPushButton#viewSegRight {
+    border-top-right-radius: 4px;
+    border-bottom-right-radius: 4px;
+    border-left: none;
+}
+QToolButton#refreshBtn {
+    border: none;
+    background: transparent;
+    padding: 2px;
+}
+QToolButton#refreshBtn:hover {
+    background-color: #e8e8e8;
+    border-radius: 3px;
+}
+QPushButton#bifEditBtn {
+    background-color: #f3f3f3;
+    border: 1px solid #c0c0c0;
+    border-radius: 5px;
+    padding: 7px 18px;
+    min-height: 24px;
+    min-width: 168px;
+    font-weight: 500;
+}
+QPushButton#bifEditBtn:hover {
+    background-color: #e8e8e8;
+}
+QPushButton#bifEditBtn:checked {
+    background-color: #d9e7fb;
+    border-color: #4a90e2;
+    color: #1a3f7a;
+    font-weight: 700;
+}
+QPushButton#bifEditBtn:checked:hover {
+    background-color: #c9def8;
+}
+QLabel#sceneHint {
+    color: #444;
+    background-color: rgba(255, 255, 255, 0);
+    padding: 2px 4px;
+}
+QLabel#viewModeLabel {
+    font-weight: 600;
+    color: #2a2a2a;
+    padding-right: 6px;
+}
+QSplitter::handle {
+    background-color: #d0d0d0;
+}
+"""
+
+
 def _apply_compact_subtree_font(root: QWidget, point_size: float = 8.0):
   """Apply ``point_size`` to ``root`` and all descendant :class:`~PyQt6.QtWidgets.QWidget` fonts.
 
@@ -361,6 +600,313 @@ def _apply_compact_subtree_font(root: QWidget, point_size: float = 8.0):
   root.setFont(f)
   for w in root.findChildren(QWidget):
     w.setFont(f)
+
+
+# ---------------------------------------------------------------------------
+# Parameter documentation — single source of truth for the (i) info icons that
+# sit beside each parameter spin-box in the bifurcation and mesh panels.
+#
+# Each entry is a dict whose fields are rendered as a small HTML tooltip
+# (and a popup window when the icon is clicked) so the user does not have
+# to leave the GUI to figure out what a parameter does, what its valid
+# range is, and how nudging it up or down will affect the downstream
+# geometry / mesh quality.
+#
+# Keep the wording terse: each field is shown on its own line in the
+# tooltip; the popup adds whitespace but does not reflow the text.
+# ---------------------------------------------------------------------------
+PARAMETER_DOCS: dict = {
+  "split_edge_eps": {
+    "title": "split_edges proximity (split_edge_eps)",
+    "purpose": (
+      "Tolerance for splitting a vessel edge at a point that almost coincides "
+      "with another edge: when two centerlines come within this distance they "
+      "are merged into a single graph vertex (a new furcation) and each edge "
+      "is split at the contact point."
+    ),
+    "math": (
+      "Edges whose minimum cross-distance is below split_edge_eps are split; "
+      "the unit matches the normalised centerline coordinate system "
+      "(VascularGraph.normalize → unit bounding box)."
+    ),
+    "default": "0.06",
+    "range": "0.0001 – 10.0  (typical 0.02 – 0.10)",
+    "increase": (
+      "More aggressive splitting → more bifurcations get detected on close "
+      "but non-touching centerlines; useful when input centerlines stop just "
+      "short of each other.  May over-split and create spurious furcations."
+    ),
+    "decrease": (
+      "Stricter splitting → only true near-coincident points become "
+      "bifurcations; preserves the input topology but can miss real "
+      "intersections present in noisy centerline traces."
+    ),
+    "side": (
+      "Changes the graph topology read by every downstream stage "
+      "(orient_nontrivial, mesh generation, fix-anchor picks)."
+    ),
+  },
+  "merge_furcs_eps": {
+    "title": "merge_furcs proximity (merge_furcs_eps)",
+    "purpose": (
+      "Two distinct furcations whose centroids are within this distance are "
+      "merged into a single n-furcation.  Used to collapse "
+      "near-coincident bifurcations that arose from noisy centerlines or "
+      "from over-splitting upstream."
+    ),
+    "math": (
+      "Euclidean distance threshold between furcation centroids, in the "
+      "same normalised unit as split_edge_eps."
+    ),
+    "default": "0.07",
+    "range": "0.0001 – 10.0  (typical 0.03 – 0.15)",
+    "increase": (
+      "More aggressive merging → small triangulated junction clusters "
+      "collapse to one n-furcation; helps when input centerlines disagree "
+      "by a few percent of the bounding box."
+    ),
+    "decrease": (
+      "Stricter merging → preserves smaller geometric details and the "
+      "original separation between nearby bifurcations; may fail to merge "
+      "nearly coincident bifurcations and leave a vessel stub that is too "
+      "short for ``mesh_rfac`` truncation (you’ll see a [merge candidate] "
+      "tag in the bif list)."
+    ),
+    "side": (
+      "Only used when ‘Use merge_furcs_proximity’ is checked.  Affects "
+      "both the bif list and the post-merge SplineGraph mesh build."
+    ),
+  },
+  "use_merge": {
+    "title": "Use merge_furcs_proximity",
+    "purpose": (
+      "Enable / disable the automatic furcation merging stage that uses "
+      "the merge_furcs_eps threshold."
+    ),
+    "default": "On",
+    "range": "On / Off",
+    "increase": "—",
+    "decrease": "—",
+    "side": (
+      "Off keeps every detected furcation as-is; you can still merge "
+      "manually from the ‘Merge candidates’ checkboxes or by adding "
+      "signed edge IDs in ‘Manual additions’."
+    ),
+  },
+  "mesh_dx": {
+    "title": "dx (target centerline spacing)",
+    "purpose": (
+      "Target arc-length spacing along vessel centerlines used by "
+      "VascularGraph.to_spline_graph and by the volumetric mesh sweep — "
+      "each edge gets ``max(2, int(length / dx))`` knot intervals."
+    ),
+    "math": (
+      "Number of hex layers along a vessel ≈ length / dx; dx is in the "
+      "same units as the input centerline coordinates."
+    ),
+    "default": "0.005",
+    "range": "0.0001 – 1.0  (typical 0.002 – 0.02)",
+    "increase": (
+      "Coarser sampling → fewer hex layers per vessel, faster mesh, but "
+      "more discretisation error in curved segments and possibly "
+      "self-intersecting bifurcation hexes (lower min(detJ))."
+    ),
+    "decrease": (
+      "Finer sampling → many more hex layers, larger meshes (RAM / "
+      "solve time grow proportionally) and more numerical accuracy on "
+      "curved vessels."
+    ),
+    "side": "Sets bif mesh ``quick_sample`` third-axis density too.",
+  },
+  "mesh_nref": {
+    "title": "nref (centerline knot refinement)",
+    "purpose": (
+      "Number of uniform knot refinement passes applied to each spline "
+      "edge before computing the truncation/rfac dictionary used to cut "
+      "vessels back from bifurcations."
+    ),
+    "default": "3",
+    "range": "0 – 10  (typical 2 – 4)",
+    "increase": (
+      "Finer xi-resolution for ``mesh_rfac`` truncation → bif-mesh cuts "
+      "land closer to the requested rfac×radius distance from the "
+      "junction centroid; very high values mostly increase build time "
+      "without further accuracy."
+    ),
+    "decrease": (
+      "Coarser xi-resolution → cuts snap to a sparser xi grid and may "
+      "leave the bif mesh under- or over-truncated, more often "
+      "triggering [INVALID] flags on the bifurcations."
+    ),
+    "side": (
+      "Affects ``rtruncate`` only; centerline geometry / mesh density "
+      "is unchanged."
+    ),
+  },
+  "mesh_rfac": {
+    "title": "rfac (bifurcation truncation factor)",
+    "purpose": (
+      "How far each vessel is cut back from a bifurcation centroid, in "
+      "multiples of the local vessel radius.  Larger rfac → longer bif "
+      "patches, shorter vessels meeting them."
+    ),
+    "math": (
+      "Cut distance along the centerline from the centroid ≈ rfac × R, "
+      "where R is the local vessel radius at the truncation point."
+    ),
+    "default": "2.0",
+    "range": "0.1 – 20.0  (typical 1.5 – 3.0)",
+    "increase": (
+      "Bigger bif patches, more retraction → easier to mesh tight "
+      "n-furcations without self-intersection; eats more vessel length, "
+      "and on close-by junctions may produce ‘merge candidate’ flags "
+      "because the inter-bif vessel stub becomes degenerate."
+    ),
+    "decrease": (
+      "Tighter cut around the centroid → preserves vessel length but the "
+      "bif patch wings may self-intersect; you’ll see [INVALID] rows "
+      "more often.  Per-branch rfac repair scan will try multipliers "
+      "{1.25, 1.5, 2.0}× before giving up."
+    ),
+    "side": (
+      "Drives both the bif mesh truncation and the vessel mesh start xi "
+      "via :func:`_compute_truncate_dict`."
+    ),
+  },
+  "mesh_section_points": {
+    "title": "section points (cross-section density)",
+    "purpose": (
+      "Number of hex elements per cross-section direction on the vessel "
+      "disc.  Must be even (rounded up if you type an odd value)."
+    ),
+    "default": "4",
+    "range": "2 – 200  (typical 4 – 12)",
+    "increase": (
+      "Denser cross-section sampling → smoother circular boundary, "
+      "better near-wall resolution for CFD boundary layers, but "
+      "quadratic growth in element count per vessel."
+    ),
+    "decrease": (
+      "Coarser section → fewer hexes per vessel cap; can make the "
+      "outer boundary polygonal and degrade Jacobian quality near the "
+      "wall."
+    ),
+    "side": "Used as ``cross_nelems`` for ``repeated_knot_disc``.",
+  },
+  "mesh_bl_exp": {
+    "title": "BL exp (boundary-layer exponent)",
+    "purpose": (
+      "Radial grading on the unit disc cross-section.  1 ⇒ uniform; "
+      "larger exponents push hex layers toward the vessel wall to "
+      "resolve a near-wall boundary layer in parameter space."
+    ),
+    "default": "1.0",
+    "range": "1.0 – 8.0  (typical 1.0 – 3.0)",
+    "increase": (
+      "Stronger BL clustering → fine elements next to the wall, "
+      "coarser ones in the core; better for CFD wall-shear-stress "
+      "computation but stretches interior cells, so Jacobian quality "
+      "drops near the centerline."
+    ),
+    "decrease": (
+      "Move toward uniform spacing → balanced cells, lower wall "
+      "resolution; safer Jacobians."
+    ),
+    "side": (
+      "Only applied if pyhaemo supports the option; otherwise a "
+      "warning is logged and a uniform disc is used."
+    ),
+  },
+  "mesh_union_eps": {
+    "title": "union ε (KD-tree gluing tolerance)",
+    "purpose": (
+      "Tolerance for matching coincident points when "
+      ":func:`pyhaemo.mesh.bool.mesh_union` glues vessel and bifurcation "
+      "boundary meshes into the final volumetric mesh."
+    ),
+    "default": "1e-8",
+    "range": "1e-9 – 1e-2  (typical 1e-9 – 1e-7)",
+    "increase": (
+      "Looser matching → more aggressive vertex merging at interfaces, "
+      "can absorb small geometric mismatches but may collapse small "
+      "real features."
+    ),
+    "decrease": (
+      "Stricter matching → only truly identical points are fused; if "
+      "set too low, mesh_union may complain about un-glued interfaces "
+      "(boundary preview shows internal seams)."
+    ),
+    "side": (
+      "Increase only when you see ‘hanging boundary’ artefacts after a "
+      "successful mesh build."
+    ),
+  },
+  "bif_exploit_symmetry": {
+    "title": "Bif exploit symmetry",
+    "purpose": (
+      "Experimental: align the inlet cross at each n-furcation so its "
+      "normal matches the bifurcation plane normal as closely as "
+      "possible (4 candidate rotations chosen by minimum angle)."
+    ),
+    "default": "Off",
+    "range": "On / Off",
+    "increase": "—",
+    "decrease": "—",
+    "side": (
+      "May improve frame alignment on symmetric n-furcations and "
+      "occasionally rescue otherwise invalid junctions; can also reorder "
+      "the disc wings and worsen quality on asymmetric ones."
+    ),
+  },
+  "filename": {
+    "title": "Output .msh file name",
+    "purpose": (
+      "File name used by ‘Export .msh’ inside the chosen output folder.  "
+      "If blank, an auto-timestamped name "
+      "(``partery_mesh_YYYYMMDD_HHMMSS.msh``) is used.  Directory "
+      "separators are stripped so you cannot escape the output folder."
+    ),
+    "default": "(blank → timestamp)",
+    "range": "Any valid filename",
+    "increase": "—",
+    "decrease": "—",
+    "side": "Exported mesh carries CFD-compatible boundary tags.",
+  },
+}
+
+
+def _format_param_tooltip(doc) -> str:
+  """Build a small HTML block summarising a parameter documentation dict.
+
+  ``doc`` may be a plain string (rendered verbatim) or a structured
+  :data:`PARAMETER_DOCS` entry; the tooltip is wrapped in a fixed-width
+  ``<div>`` so multi-line text does not get squashed by Qt's auto-wrap.
+  """
+  if isinstance(doc, str):
+    return doc
+  if not isinstance(doc, dict):
+    return ""
+  parts: list[str] = []
+  title = doc.get("title")
+  if title:
+    parts.append(f"<b>{title}</b>")
+  for label, key in (
+    ("Purpose", "purpose"),
+    ("Meaning", "math"),
+    ("Default", "default"),
+    ("Range", "range"),
+    ("Increasing", "increase"),
+    ("Decreasing", "decrease"),
+    ("Side effects", "side"),
+  ):
+    val = doc.get(key)
+    if val and val != "—":
+      parts.append(f"<b>{label}:</b> {val}")
+  return (
+    "<div style='max-width: 380px;'>"
+    + "<br><br>".join(parts)
+    + "</div>"
+  )
 
 
 def build_graph(csv_folder, split_eps, merge_eps, use_merge, removed_keys, manual_additions,
@@ -470,7 +1016,8 @@ def generate_mesh(csv_folder, split_eps, merge_eps, use_merge, mesh_dx, mesh_nre
                   merge_opt_in=(),
                   fix_anchor_bif_key=None,
                   fix_branch_anchors=None,
-                  fix_anchor_specs=()):
+                  fix_anchor_specs=(),
+                  progress_cb=None):
   """Run the full artery pipeline and return the volumetric hex mesh (CPU-heavy).
 
   ``merge_opt_in`` is an iterable of "component specs"; each spec is itself
@@ -502,12 +1049,32 @@ def generate_mesh(csv_folder, split_eps, merge_eps, use_merge, mesh_dx, mesh_nre
   When any fix-anchor trimming runs (``fix_anchor_specs`` or the legacy single-bif
   kwargs), the downstream :meth:`SplineGraph.make_mesh` call uses
   ``rfac_retry=False`` for that entire run.
+
+  ``progress_cb`` (optional): callable ``progress_cb(stage_name, step, total)``
+  invoked at each pipeline stage so the caller can drive a UI progress
+  indicator without having to instrument internal mesh code.  Exceptions
+  raised by the callback are swallowed so a broken progress sink never
+  corrupts the mesh run.
   """
+  # Total number of named stages we emit progress for.  Bump this when
+  # adding/removing a ``_progress`` call below.
+  _N_STAGES = 8
+
+  def _progress(name, step):
+    if progress_cb is None:
+      return
+    try:
+      progress_cb(name, int(step), int(_N_STAGES))
+    except Exception:
+      pass
+
   from mesh import apply_merge_opt_in_vgraph
+  _progress("Loading centerlines and preprocessing", 1)
   artery = build_graph(
     csv_folder, split_eps, merge_eps, use_merge, removed_keys, manual_additions,
     removed_centerline_ids=removed_centerline_ids,
   )
+  _progress("Orienting nontrivial furcations", 2)
   artery = artery.orient_nontrivial()
   # Apply opt-in merges on the VascularGraph, *before* normal / frame
   # alignment.  ``merged_key_to_members`` maps the merged n-furcation's
@@ -515,6 +1082,7 @@ def generate_mesh(csv_folder, split_eps, merge_eps, use_merge, mesh_dx, mesh_nre
   # — :func:`make_spline_mesh` uses it to back-fill validity/repair info
   # onto those member bif-keys (for diagnostics); the GUI list/3D bif view
   # show the merged n-furcation row instead of the absorbed ones.
+  _progress("Applying user-merged n-furcations", 3)
   artery, merged_key_to_members = apply_merge_opt_in_vgraph(
     artery, merge_opt_in,
   )
@@ -544,6 +1112,7 @@ def generate_mesh(csv_folder, split_eps, merge_eps, use_merge, mesh_dx, mesh_nre
       }
       artery = apply_fix_branch_anchors_to_vgraph(artery, fk, anchors)
       fix_anchors_applied = True
+  _progress("Aligning normals and frames", 4)
   artery = (
     artery.align_nontrivial_normals()
     .orient_trivial()
@@ -554,13 +1123,18 @@ def generate_mesh(csv_folder, split_eps, merge_eps, use_merge, mesh_dx, mesh_nre
   )
   # Spline knot density along each vessel matches volumetric ``mesh_dx``:
   # ``max(2, int(edge.length / mesh_dx))`` per edge (see ``to_spline_graph``).
-  return artery.to_spline_graph(dx=mesh_dx).make_mesh(
+  _progress("Building spline graph", 5)
+  sgraph = artery.to_spline_graph(dx=mesh_dx)
+  _progress("Generating volume mesh (vessels + bifurcations)", 6)
+  mesh = sgraph.make_mesh(
     dx=mesh_dx, nref=mesh_nref, rfac=mesh_rfac, cross_nelems=mesh_section_points,
     union_eps=mesh_union_eps, bif_exploit_symmetry=bif_exploit_symmetry,
     boundary_layer_exponent=boundary_layer_exponent,
     merged_key_to_members=merged_key_to_members,
     rfac_retry=not fix_anchors_applied,
   )
+  _progress("Volume mesh built", 7)
+  return mesh
 
 
 def _extract_boundary_points_for_preview(mesh):
@@ -596,7 +1170,7 @@ def _extract_boundary_points_for_preview(mesh):
 
 
 class MeshComputeThread(QThread):
-  """Runs ``work_fn`` off the GUI thread; results are delivered via Qt signals.
+  """Legacy in-thread worker (kept for reference; new code uses :class:`MeshComputeProcess`).
 
   ``finished_ok`` payloads:
     ``(mesh, aux_points, stats, boundary_wire, boundary_scatter,
@@ -627,6 +1201,361 @@ class MeshComputeThread(QThread):
       self.finished_err.emit(traceback.format_exc())
 
 
+def _build_bif_validity_dict(mesh):
+  """Pure helper used by both in-process and subprocess workers.
+
+  ``make_spline_mesh`` attaches ``mesh.bif_validity`` and ``mesh.bif_overlaps``;
+  this turns them into the per-bif dict the GUI consumes:
+  ``{frozenset_key: {"valid": bool, "repair": dict | None, "overlaps": list}}``.
+  """
+  raw = getattr(mesh, "bif_validity", ())
+  bvalid: dict = {}
+  for entry in raw:
+    if len(entry) == 2:
+      k, v = entry
+      repair = None
+    else:
+      k, v, repair = entry[0], entry[1], entry[2] if len(entry) > 2 else None
+    bvalid[frozenset(int(i) for i in k)] = {
+      "valid": bool(v),
+      "repair": repair,
+      "overlaps": [],
+    }
+  for ov in getattr(mesh, "bif_overlaps", ()):
+    bs = ov.get("bif_start")
+    be = ov.get("bif_end")
+    if bs is None or be is None:
+      attached = bs or be
+      if attached is None:
+        continue
+      bvalid.setdefault(attached, {
+        "valid": True, "repair": None, "overlaps": [],
+      })["overlaps"].append({
+        "iedge": int(ov["iedge"]),
+        "remaining_fraction": float(ov["remaining_fraction"]),
+        "other": None,
+      })
+      continue
+    info = {
+      "iedge": int(ov["iedge"]),
+      "remaining_fraction": float(ov["remaining_fraction"]),
+    }
+    bvalid.setdefault(bs, {
+      "valid": True, "repair": None, "overlaps": [],
+    })["overlaps"].append({**info, "other": be})
+    bvalid.setdefault(be, {
+      "valid": True, "repair": None, "overlaps": [],
+    })["overlaps"].append({**info, "other": bs})
+  return bvalid
+
+
+def _build_merge_components(mesh):
+  """Plain-dict snapshot of ``mesh.merge_components`` (signal-safe / picklable)."""
+  components_raw = getattr(mesh, "merge_components", ()) or ()
+  return [
+    {
+      "component_id": comp["component_id"],
+      "bif_keys": tuple(
+        frozenset(int(i) for i in k) for k in comp["bif_keys"]
+      ),
+      "internal_edges": tuple(sorted(int(i) for i in comp["internal_edges"])),
+    }
+    for comp in components_raw
+  ]
+
+
+def _mesh_worker_entry(kw, result_queue):
+  """Subprocess entry point for :class:`MeshComputeProcess`.
+
+  Top-level so the function is importable for pickling under any
+  ``multiprocessing`` start method (``fork``/``spawn``).  Runs the same
+  computation the in-thread worker used to do, then pushes one of:
+
+    * ``("ok", (mesh, bpts, stats, bwire, bscatter, bfaces, bvalid, mcomp))``
+    * ``("err", traceback_string)``
+
+  onto ``result_queue``.  The parent picks the message up with
+  ``Queue.get_nowait()`` from a Qt timer; if the user clicks "Stop", the
+  parent SIGTERMs / SIGKILLs the subprocess and the queue is discarded.
+
+  In a forked child the GUI's signal handlers are inherited; reinstall the
+  default SIGINT handler so a Ctrl-C in a terminal session also stops the
+  worker cleanly.
+  """
+  try:
+    _signal.signal(_signal.SIGINT, _signal.SIG_DFL)
+  except Exception:
+    pass
+  # Ensure the partery package is importable when the start method is
+  # ``spawn`` (fresh interpreter).  With ``fork`` (Linux default) sys.path
+  # is inherited from the parent so this is a no-op.
+  here = os.path.dirname(os.path.abspath(__file__))
+  parent = os.path.dirname(here)
+  for p in (here, parent):
+    if p and p not in sys.path:
+      sys.path.insert(0, p)
+
+  def _progress_cb(stage_name, step, total):
+    # Non-blocking best-effort progress hop into the parent's queue.  Any
+    # failure (queue closed because parent killed us, broken pipe on
+    # ``spawn``, etc.) is ignored — progress is informational only.
+    try:
+      result_queue.put_nowait((
+        "progress",
+        {"stage": str(stage_name), "step": int(step), "total": int(total)},
+      ))
+    except Exception:
+      pass
+
+  try:
+    _progress_cb("Initializing", 0, 8)
+    mesh = generate_mesh(progress_cb=_progress_cb, **kw)
+    _progress_cb("Computing boundary preview", 7, 8)
+    bpts = _extract_boundary_points_for_preview(mesh)
+    stats = mesh_statistics(mesh)
+    bwire, bscatter, bfaces = _boundary_preview_arrays(mesh)
+    bvalid = _build_bif_validity_dict(mesh)
+    mcomp = _build_merge_components(mesh)
+    _progress_cb("Finalizing", 8, 8)
+    payload = (mesh, bpts, stats, bwire, bscatter, bfaces, bvalid, mcomp)
+    try:
+      result_queue.put(("ok", payload))
+    except Exception:
+      # Mesh object is not picklable across processes — fall back to a
+      # boundary-only payload so the GUI can still display the preview and
+      # statistics; ``Export .msh`` and ``Check mesh validity`` will be
+      # unavailable in that case (we surface a warning string).
+      try:
+        result_queue.put((
+          "ok_no_mesh",
+          (bpts, stats, bwire, bscatter, bfaces, bvalid, mcomp),
+        ))
+      except Exception:
+        result_queue.put(("err", traceback.format_exc()))
+  except BaseException:
+    try:
+      result_queue.put(("err", traceback.format_exc()))
+    except Exception:
+      # If even the traceback can't be queued (e.g. the parent already
+      # killed us mid-put), exit silently — the parent treats a dead
+      # subprocess with an empty queue as a cancellation.
+      pass
+
+
+class MeshComputeProcess(QObject):
+  """Runs the mesh worker in a **subprocess** so cancellation is instant.
+
+  Why a process instead of a thread:
+
+  * ``generate_mesh`` spends most of its time inside numba / numpy native
+    loops that don't poll Python interruption flags and that hold tight
+    references through C extensions.  ``QThread.terminate()`` /
+    ``pthread_cancel`` can't reliably interrupt that code, and on some
+    builds it leaves the heap in an inconsistent state.
+  * An OS subprocess can be killed at any time with ``SIGTERM`` (or
+    ``SIGKILL`` if it doesn't honour ``SIGTERM`` within a short grace
+    window), so "Stop Mesh Generation" returns control to the GUI
+    immediately and all worker memory is reclaimed by the kernel.
+
+  Result delivery uses a :class:`multiprocessing.Queue` polled from a
+  ``QTimer`` — the GUI thread never calls ``wait()``.
+  """
+
+  finished_ok = pyqtSignal(object, object, object, object, object, object, object, object)
+  finished_err = pyqtSignal(str)
+  finished = pyqtSignal()  # always emitted exactly once when the run ends
+  # ``progress(stage_name, step, total)`` — emitted any time the worker
+  # crosses a named pipeline stage.  Step counters are monotonic up to
+  # ``total`` but progress events may be coalesced if the queue drains
+  # faster than the timer fires, so consumers should treat the latest
+  # message as authoritative rather than counting events.
+  progress = pyqtSignal(str, int, int)
+
+  # Poll cadence for the result queue (ms).  Small enough to feel snappy,
+  # large enough to be cheap.
+  _POLL_MS = 80
+  # After ``stop()``, how long to give the worker to honour SIGTERM before
+  # escalating to SIGKILL.  Chosen short on purpose: native loops won't
+  # honour SIGTERM at all, so the deferred SIGKILL is the realistic stop.
+  _SIGTERM_GRACE_MS = 200
+
+  def __init__(self, kw, parent=None):
+    super().__init__(parent)
+    self._kw = kw
+    self._proc = None
+    self._queue = None
+    self._timer = None
+    self._cancelled = False
+    self._done = False
+
+  def start(self):
+    """Spawn the subprocess and start polling for the result."""
+    if self._proc is not None:
+      return
+    # ``fork`` (Linux default) is fastest and inherits the parent's
+    # already-imported partery/pyhaemo/numba caches.  ``spawn`` works too
+    # but pays a full re-import on every Generate click.  Either way the
+    # child immediately enters ``_mesh_worker_entry`` and never touches Qt.
+    ctx = mp.get_context()
+    self._queue = ctx.Queue()
+    self._proc = ctx.Process(
+      target=_mesh_worker_entry,
+      args=(self._kw, self._queue),
+      name="pyhaemo-mesh-worker",
+      daemon=True,
+    )
+    self._proc.start()
+    self._timer = QTimer(self)
+    self._timer.setInterval(self._POLL_MS)
+    self._timer.timeout.connect(self._poll)
+    self._timer.start()
+
+  def is_running(self) -> bool:
+    return self._proc is not None and self._proc.is_alive() and not self._done
+
+  def stop(self):
+    """Request immediate cancellation (non-blocking).
+
+    Sends ``SIGTERM`` straight away and schedules a follow-up ``SIGKILL``
+    after a short grace window.  Neither call ever blocks the GUI thread.
+    """
+    if self._proc is None or self._done:
+      return
+    self._cancelled = True
+    if self._timer is not None:
+      self._timer.stop()
+    try:
+      if self._proc.is_alive():
+        self._proc.terminate()  # SIGTERM
+    except Exception:
+      pass
+    # Defer the SIGKILL escalation onto the Qt event loop so we don't have
+    # to ``join()`` from the GUI thread.  After the grace period, finalise.
+    QTimer.singleShot(self._SIGTERM_GRACE_MS, self._force_kill_and_finalise)
+
+  def _force_kill_and_finalise(self):
+    if self._proc is None:
+      return
+    try:
+      if self._proc.is_alive():
+        # ``kill()`` was added in Py 3.7; on older interpreters fall back
+        # to a manual ``os.kill(pid, SIGKILL)``.
+        if hasattr(self._proc, "kill"):
+          self._proc.kill()
+        else:
+          os.kill(self._proc.pid, _signal.SIGKILL)
+    except Exception:
+      pass
+    # ``join`` with a zero timeout never blocks; we don't actually care
+    # whether the kernel has reaped the zombie yet — the GUI is free to
+    # carry on.  The Process object will be garbage-collected in due course.
+    try:
+      self._proc.join(timeout=0)
+    except Exception:
+      pass
+    self._finalise(emit_err="Mesh generation was cancelled.")
+
+  def _poll(self):
+    """Non-blocking queue read driven by the GUI's QTimer.
+
+    Drains all currently-available messages each tick so progress events
+    don't pile up when many fire between polls; if a terminal message
+    (``ok`` / ``ok_no_mesh`` / ``err``) is seen, we stop draining and
+    finalise.  An unexpected subprocess death with an empty queue is
+    treated as a crash.
+    """
+    if self._done or self._queue is None:
+      return
+    drained_any = False
+    while True:
+      try:
+        kind, payload = self._queue.get_nowait()
+      except _queue_mod.Empty:
+        break
+      drained_any = True
+      if kind == "progress":
+        try:
+          self.progress.emit(
+            str(payload.get("stage", "")),
+            int(payload.get("step", 0)),
+            int(payload.get("total", 0)),
+          )
+        except Exception:
+          pass
+        continue
+      # Any other message is terminal — handle it and bail.
+      self._handle_message(kind, payload)
+      return
+    if not drained_any and self._proc is not None and not self._proc.is_alive():
+      # Subprocess vanished without producing a terminal message.  Try one
+      # final non-blocking drain to cover the inherent race between
+      # ``is_alive()`` and the queue write, then give up.
+      try:
+        kind, payload = self._queue.get_nowait()
+      except _queue_mod.Empty:
+        self._finalise(emit_err=(
+          "Mesh worker exited before producing a result "
+          f"(exit code {self._proc.exitcode})."
+        ))
+        return
+      self._handle_message(kind, payload)
+
+  def _handle_message(self, kind, payload):
+    if kind == "ok":
+      mesh, bpts, stats, bwire, bscatter, bfaces, bvalid, mcomp = payload
+      self._finalise(
+        emit_ok=(mesh, bpts, stats, bwire, bscatter, bfaces, bvalid, mcomp),
+      )
+    elif kind == "ok_no_mesh":
+      bpts, stats, bwire, bscatter, bfaces, bvalid, mcomp = payload
+      # ``mesh=None`` ⇒ GUI shows the preview but greys out Export / Check
+      # validity; the worker already surfaced a status hint.
+      self._finalise(
+        emit_ok=(None, bpts, stats, bwire, bscatter, bfaces, bvalid, mcomp),
+        warn="Mesh result is too large or non-serialisable; only the preview is shown.",
+      )
+    elif kind == "err":
+      self._finalise(emit_err=str(payload))
+    else:
+      self._finalise(emit_err=f"Unexpected message kind {kind!r} from worker.")
+
+  def _finalise(self, *, emit_ok=None, emit_err=None, warn=None):
+    if self._done:
+      return
+    self._done = True
+    if self._timer is not None:
+      self._timer.stop()
+      self._timer.deleteLater()
+      self._timer = None
+    # Best-effort close of queue / process handles; never blocks.
+    proc = self._proc
+    self._proc = None
+    q = self._queue
+    self._queue = None
+    if q is not None:
+      try:
+        q.close()
+      except Exception:
+        pass
+    if proc is not None:
+      try:
+        if proc.is_alive():
+          proc.terminate()
+      except Exception:
+        pass
+      try:
+        proc.join(timeout=0)
+      except Exception:
+        pass
+    if emit_ok is not None:
+      if warn:
+        self.finished_err.emit(warn)
+      self.finished_ok.emit(*emit_ok)
+    elif emit_err is not None:
+      self.finished_err.emit(emit_err)
+    self.finished.emit()
+
+
 class Scene3D(QWidget):
   """Embedded pyqtgraph OpenGL scene: centerlines, bifurcations, or mesh boundary.
 
@@ -638,9 +1567,13 @@ class Scene3D(QWidget):
   dollies in and recenters so that screen region fills the view (rubber-band zoom).
   """
 
-  # 7-segment style glyphs for in-scene numeric labels (no GL text texture).
-  SEG = {"A": ((0, 2), (1, 2)), "B": ((1, 2), (1, 1)), "C": ((1, 1), (1, 0)), "D": ((0, 0), (1, 0)), "E": ((0, 1), (0, 0)), "F": ((0, 2), (0, 1)), "G": ((0, 1), (1, 1))}
-  DIG = {"0": ("A", "B", "C", "D", "E", "F"), "1": ("B", "C"), "2": ("A", "B", "G", "E", "D"), "3": ("A", "B", "G", "C", "D"), "4": ("F", "G", "B", "C"), "5": ("A", "F", "G", "C", "D"), "6": ("A", "F", "G", "C", "D", "E"), "7": ("A", "B", "C"), "8": ("A", "B", "C", "D", "E", "F", "G"), "9": ("A", "B", "C", "D", "F", "G"), "-": ("G",)}
+  # Labels are rendered as billboarded text via :class:`pyqtgraph.opengl.GLTextItem`,
+  # which paints with ``QPainter.drawText`` at the projected pixel position so
+  # they always face the active camera and remain legible after any
+  # rotate / zoom / pan / reset-view operation.  The previous 7-segment polyline
+  # glyph machinery (``SEG``/``DIG``) has been removed: it produced flat text
+  # in the world XY plane that became edge-on (i.e. unreadable) at the default
+  # camera attitude and required manual rotation to inspect.
 
   def __init__(self, parent=None):
     super().__init__(parent)
@@ -936,21 +1869,58 @@ class Scene3D(QWidget):
     self.view.addItem(item)
     self.items.append(item)
 
-  def _digit(self, pos, text, color, scale, line_gl_kw=None):
-    """Draw ``text`` as 7-segment polylines near ``pos`` (world units)."""
-    line_kw = {} if line_gl_kw is None else line_gl_kw
-    x = 0.0
-    for ch in str(text):
-      segs = self.DIG.get(ch)
-      if segs is None:
-        x += 1.25
-        continue
-      for seg in segs:
-        (x0, y0), (x1, y1) = self.SEG[seg]
-        p0 = np.array([x0 + x, y0, 0.0]) * scale + pos
-        p1 = np.array([x1 + x, y1, 0.0]) * scale + pos
-        self._line(np.vstack([p0, p1]), color, 1.0, **line_kw)
-      x += 1.25
+  # Defaults for billboarded labels.  Centerline / branch labels render in
+  # dark grey and bifurcation labels in red so the two readings stay
+  # distinguishable on a white background.  The font is *bold* so labels
+  # remain readable at the small default point size; the actual on-screen
+  # size is responsive to the camera distance (see ``_label``).
+  _LABEL_FONT_FAMILY = "Helvetica"
+  _LABEL_BASE_POINT_SIZE = 10
+  _LABEL_BOLD = True
+
+  def _label(self, pos, text, color, *, point_size=None, bold=None,
+             font_family=None):
+    """Draw ``text`` as a camera-facing label at world ``pos``.
+
+    Uses :class:`pyqtgraph.opengl.GLTextItem`, which paints with
+    ``QPainter.drawText`` at the projected screen-space position so labels
+    always face the active camera regardless of orbit / pan / zoom and remain
+    legible immediately after a camera reset.
+
+    ``color`` is an RGBA tuple in ``[0, 1]``; ``point_size`` and ``bold``
+    override the class defaults when given.
+    """
+    if gl is None or self.view is None:
+      return
+    try:
+      r, g, b, a = color
+      qcolor = QColor.fromRgbF(
+        float(r), float(g), float(b), float(a) if a is not None else 1.0,
+      )
+    except Exception:
+      qcolor = QColor("black")
+    font = QFont(
+      str(font_family) if font_family else self._LABEL_FONT_FAMILY,
+      int(point_size) if point_size is not None else self._LABEL_BASE_POINT_SIZE,
+    )
+    font.setBold(bool(self._LABEL_BOLD if bold is None else bold))
+    try:
+      item = gl.GLTextItem(
+        pos=np.asarray(pos, dtype=float).reshape(3),
+        text=str(text),
+        color=qcolor,
+        font=font,
+      )
+    except Exception:
+      return
+    # Render labels above geometry so the depth test does not hide them
+    # behind walls / wires that share the same z-plane.
+    try:
+      item.setDepthValue(50)
+    except Exception:
+      pass
+    self.view.addItem(item)
+    self.items.append(item)
 
   def draw_centerlines(self, centerlines, selected_id=None, preserve_camera=False):
     """Render centerline polylines; optionally highlight one.
@@ -1000,7 +1970,14 @@ class Scene3D(QWidget):
       if pts.shape[0] < 2:
         continue
       mid = pts[pts.shape[0] // 2]
-      self._digit(mid + np.array([0.0, 0.0, 0.1 * s]), idx, (0.1, 0.1, 0.1, 1.0), 0.52 * s)
+      # Tiny world-space offset along z so the label sits *just* above the
+      # polyline; the actual on-screen position is camera-projected, so this
+      # is mostly cosmetic (prevents the glyph cap from kissing the line).
+      offset = np.array([0.0, 0.0, 0.1 * s])
+      self._label(
+        mid + offset, idx, (0.10, 0.10, 0.10, 1.0),
+        bold=True,
+      )
 
   def draw_bifurcations(self, graph, selected_key, preserve_camera=False,
                         invalid_keys=frozenset()):
@@ -1082,28 +2059,31 @@ class Scene3D(QWidget):
       s = 0.016 * r
     else:
       s = self._fit(all_pts_arr)
-    _bif_label_color = (1.0, 0.2, 0.2, 1.0)
+    # Camera-facing labels: edges in dark grey (same as Centerlines view, so
+    # the user reads the same display id regardless of which mode is active);
+    # n-furcations get a "B<k>" label in saturated red, drawn bolder when
+    # selected so the active junction is obvious without rotating the view.
+    _edge_label_color = (0.10, 0.10, 0.10, 1.0)
+    _bif_label_color = (0.85, 0.05, 0.05, 1.0)
     for idx, edge in zip(graph.indices, graph.edges):
       pts = edge.points[:, :3]
       if pts.shape[0] < 2:
         continue
-      self._digit(
+      self._label(
         pts[pts.shape[0] // 2] + np.array([0.0, 0.0, 0.09 * s]),
         idx,
-        _bif_label_color,
-        0.50 * s,
-        line_gl_kw=_bif_gl,
+        _edge_label_color,
       )
     for ib, furc in enumerate(graph.nontrivial_furcations, start=1):
       center = np.asarray(furc.centroid, dtype=float).ravel()
       key = frozenset(int(i) for i in furc.indices)
       sel = selected_key is not None and key == selected_key
-      self._digit(
+      self._label(
         center + np.array([0.0, 0.0, 0.12 * s]),
-        ib,
+        f"B{ib}",
         _bif_label_color,
-        (0.60 if sel else 0.52) * s,
-        line_gl_kw=_bif_gl,
+        point_size=self._LABEL_BASE_POINT_SIZE + (2 if sel else 0),
+        bold=True,
       )
 
   def draw_mesh(self, mesh, preview_points=None, boundary_wire=None,
@@ -1361,11 +2341,11 @@ class Scene3D(QWidget):
       if pts.shape[0] < 2:
         continue
       mid = pts[pts.shape[0] // 2]
-      self._digit(
+      self._label(
         mid + np.array([0.0, 0.0, 0.1 * s]),
         idx,
-        (0.1, 0.1, 0.1, 1.0),
-        0.52 * s,
+        (0.10, 0.10, 0.10, 1.0),
+        bold=True,
       )
     if ref_centroid is not None and ref_roots_arr is not None:
       ref_rgba = (0.92, 0.48, 0.06, 1.0)
@@ -1457,6 +2437,7 @@ class MeshGeneratorWindow(QMainWindow):
     self._removed_centerline_ids = set()
     self._manual_additions = []
     self._last_view_mode = "Centerlines"
+    self._view_before_fix = "Centerlines"
     # (edge_display_id, world_xyz) anchors along each branch — Fix bifurcation mode.
     self._fix_border_hits: list[tuple[int, np.ndarray]] = []
     # Completed or in-progress picks per bif key (survives switching list rows).
@@ -1469,17 +2450,8 @@ class MeshGeneratorWindow(QMainWindow):
     # --- Central widget: splitter fills height; grip row fixed at bottom ------------
     root = QWidget()
     self.setCentralWidget(root)
+    self.setStyleSheet(APP_STYLESHEET)
     root_layout = QVBoxLayout(root)
-    self._view_hint_label = QLabel(
-      "3D view: drag to rotate · Ctrl+drag to pan · wheel zoom · Shift+drag a rectangle to zoom that region"
-    )
-    self._view_hint_label.setWordWrap(True)
-    self._view_hint_label.setObjectName("viewHintLabel")
-    hint_font = QFont(self._view_hint_label.font())
-    hint_font.setPointSizeF(7.0)
-    self._view_hint_label.setFont(hint_font)
-    self._view_hint_label.setStyleSheet("color: #555555;")
-    root_layout.addWidget(self._view_hint_label)
     splitter = QSplitter()
     root_layout.addWidget(splitter, stretch=1)
 
@@ -1490,12 +2462,23 @@ class MeshGeneratorWindow(QMainWindow):
       QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
     )
 
-    # Scrollable column: input, bifurcations (incl. editing lists), mesh parameters.
+    # Scrollable column: brand logo, input, bifurcations (incl. editing lists), mesh parameters.
     left_content = QWidget()
+    left_content.setObjectName("sectionContainer")
     left_content.setSizePolicy(
       QSizePolicy.Policy.Preferred, QSizePolicy.Policy.MinimumExpanding
     )
     left_layout = QVBoxLayout(left_content)
+    left_layout.setContentsMargins(10, 8, 10, 8)
+    left_layout.setSpacing(12)
+    left_logo = self._logo_label(width=220)
+    if left_logo is not None:
+      left_logo.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+      logo_row = QHBoxLayout()
+      logo_row.setContentsMargins(2, 2, 0, 6)
+      logo_row.addWidget(left_logo)
+      logo_row.addStretch(1)
+      left_layout.addLayout(logo_row)
     left_layout.addWidget(self._input_group())
     left_layout.addWidget(self._bifurcation_group(), stretch=1)
     left_layout.addWidget(self._fix_bif_group())
@@ -1526,21 +2509,32 @@ class MeshGeneratorWindow(QMainWindow):
     left_strip_layout.addWidget(self.status)
 
     right = QWidget()
+    right.setObjectName("sectionContainer")
     right.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
     right_layout = QVBoxLayout(right)
-    header = QWidget()
-    header_layout = QHBoxLayout(header)
-    header_layout.setContentsMargins(0, 0, 0, 0)
-    header_layout.addStretch(1)
-    header_logo = self._logo_label(width=130)
-    if header_logo is not None:
-      header_layout.addWidget(header_logo)
-    header_layout.addStretch(1)
-    right_layout.addWidget(header)
+    right_layout.setContentsMargins(8, 6, 8, 6)
+    right_layout.setSpacing(6)
+    right_layout.addWidget(self._build_view_mode_bar())
     self.scene = Scene3D(right)
     self.scene.on_bif_click = self._on_bif_clicked_3d
     self.scene.on_cl_click = self._on_cl_clicked_3d
     right_layout.addWidget(self.scene, stretch=4)
+    self._view_hint_label = QLabel(
+      "3D view:\n"
+      "  · Drag to rotate\n"
+      "  · Ctrl + drag to pan\n"
+      "  · Wheel to zoom\n"
+      "  · Shift + drag a rectangle to zoom that region",
+      parent=self.scene,
+    )
+    self._view_hint_label.setObjectName("sceneHint")
+    self._view_hint_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+    hint_font = QFont(self._view_hint_label.font())
+    hint_font.setPointSizeF(7.5)
+    self._view_hint_label.setFont(hint_font)
+    self._view_hint_label.adjustSize()
+    self._view_hint_label.move(10, 8)
+    self._view_hint_label.raise_()
     self.id_map_hdr = QLabel("Centerline ID map")
     self.id_map_hdr.setToolTip(
       "Select a row to highlight that centerline in 3D; click a centerline "
@@ -1592,8 +2586,10 @@ class MeshGeneratorWindow(QMainWindow):
     self._last_font_pt = pt
     if hasattr(self, "_view_hint_label"):
       hf = QFont(self._view_hint_label.font())
-      hf.setPointSizeF(max(6.5, pt - 2.0))
+      hf.setPointSizeF(max(6.5, pt - 1.5))
       self._view_hint_label.setFont(hf)
+      self._view_hint_label.adjustSize()
+      self._view_hint_label.move(10, 8)
 
   def _init_logo(self):
     """Set window icon from project logo if available."""
@@ -1605,15 +2601,24 @@ class MeshGeneratorWindow(QMainWindow):
       self.setWindowIcon(icon)
 
   def _logo_label(self, width=260):
-    """Create a visible logo label (e.g. header)."""
+    """Create a visible logo label (e.g. header).
+
+    The on-disk ``logotipo.png`` ships with significant transparent /
+    near-white padding around the wordmark.  We auto-crop that padding
+    at runtime via :func:`_crop_logo_pixmap` so the displayed pixmap
+    fills the requested ``width`` with actual artwork rather than empty
+    space — i.e. the wordmark reads at a useful size in the left pane
+    without rebalancing the layout.
+    """
     logo_path = _resolve_logo_path(kind="logotipo")
     if logo_path is None:
       return None
     pix = QPixmap(logo_path)
     if pix.isNull():
       return None
+    pix = _crop_logo_pixmap(pix)
     label = QLabel()
-    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     label.setPixmap(pix.scaledToWidth(int(width), Qt.TransformationMode.SmoothTransformation))
     return label
 
@@ -1634,6 +2639,81 @@ class MeshGeneratorWindow(QMainWindow):
       f"Cells: {stats['n_cells']:,} · Vertices: {stats['n_vertices']:,} · "
       f"Mean hex edge length: {avg_txt} · {stats.get('kind', '')}"
     )
+
+  # ----------- Progress panel (swaps in for the stats label) ----------------
+
+  def _show_progress_panel(self):
+    """Hide ``Last mesh statistics`` and show the live progress widgets.
+
+    The previous stats payload remains in ``self._mesh_stats``; we never
+    clear ``self.last_mesh`` here so Export / Check-validity still operate
+    on the prior mesh while a new run is in flight, and so we can restore
+    the stats line verbatim if this new run is cancelled or fails.
+    """
+    if not hasattr(self, "_progress_bar"):
+      return
+    self._mesh_stats_hdr.setVisible(False)
+    self.mesh_stats_label.setVisible(False)
+    self._progress_hdr.setVisible(True)
+    self._progress_stage_label.setVisible(True)
+    self._progress_bar.setVisible(True)
+    self._progress_elapsed_label.setVisible(True)
+    self._progress_stage_label.setText("Initializing…")
+    self._progress_bar.setRange(0, 0)
+    self._progress_bar.setFormat("Starting…")
+    self._progress_elapsed_label.setText("Elapsed: 0s")
+    self._progress_started_ms = int(time.time() * 1000)
+    self._progress_elapsed_timer.start()
+
+  def _show_stats_panel(self):
+    """Hide the live progress widgets and restore the stats display."""
+    if not hasattr(self, "_progress_bar"):
+      return
+    if self._progress_elapsed_timer.isActive():
+      self._progress_elapsed_timer.stop()
+    self._progress_started_ms = None
+    self._progress_hdr.setVisible(False)
+    self._progress_stage_label.setVisible(False)
+    self._progress_bar.setVisible(False)
+    self._progress_elapsed_label.setVisible(False)
+    self._mesh_stats_hdr.setVisible(True)
+    self.mesh_stats_label.setVisible(True)
+
+  def _on_mesh_progress(self, stage_name, step, total):
+    """Slot for ``MeshComputeProcess.progress``.
+
+    Updates the stage label and switches the bar from indeterminate
+    (busy stripe) to determinate (step counter) once we have real
+    numbers.  ``step==0`` is treated as "still initializing" and keeps
+    the busy-stripe animation.
+    """
+    if not hasattr(self, "_progress_bar"):
+      return
+    # Bar may not be visible if the user cancelled in the meantime — be
+    # defensive and silently no-op in that case.
+    if not self._progress_bar.isVisible():
+      return
+    self._progress_stage_label.setText(str(stage_name) if stage_name else "…")
+    if total > 0 and step > 0:
+      self._progress_bar.setRange(0, int(total))
+      self._progress_bar.setValue(int(step))
+      self._progress_bar.setFormat(f"Step {int(step)} of {int(total)}")
+    else:
+      self._progress_bar.setRange(0, 0)
+      self._progress_bar.setFormat("Starting…")
+
+  def _tick_progress_elapsed(self):
+    """Refreshes the ``Elapsed: Xm Ys`` label every 250 ms while running."""
+    if self._progress_started_ms is None:
+      return
+    elapsed_ms = int(time.time() * 1000) - int(self._progress_started_ms)
+    secs = max(0, elapsed_ms // 1000)
+    if secs < 60:
+      txt = f"Elapsed: {secs}s"
+    else:
+      m, s = divmod(secs, 60)
+      txt = f"Elapsed: {m}m {s:02d}s"
+    self._progress_elapsed_label.setText(txt)
 
   def _clear_cached_mesh(self):
     """Invalidate last generated mesh and all preview caches (e.g. after graph edits)."""
@@ -1806,37 +2886,248 @@ class MeshGeneratorWindow(QMainWindow):
 
   # --- QWidget groups (left panel) -------------------------------------------
 
+  def _param_info_icon(self, doc_key: str, *, parent: QWidget | None = None) -> QToolButton:
+    """Build a compact ``ⓘ`` info button bound to :data:`PARAMETER_DOCS`.
+
+    Hovering the button shows a small rich-text tooltip; clicking it pops up
+    a non-modal :class:`~PyQt6.QtWidgets.QMessageBox` with the same content
+    laid out for easier reading on small screens.  The doc key must exist in
+    :data:`PARAMETER_DOCS` or the tooltip falls back to the bare key.
+    """
+    doc = PARAMETER_DOCS.get(doc_key, {}) or {"title": doc_key, "purpose": ""}
+    btn = QToolButton(parent)
+    # ``ⓘ`` (U+24D8) reads well at small sizes; on systems without that
+    # glyph Qt falls back to the plain "i" character automatically.
+    btn.setText("\u24d8")
+    btn.setAutoRaise(True)
+    btn.setCursor(Qt.CursorShape.WhatsThisCursor)
+    btn.setToolTip(_format_param_tooltip(doc))
+    btn.setStyleSheet(
+      "QToolButton { color: #1a5fb4; padding: 0 2px; border: none; }"
+      "QToolButton:hover { color: #0b4a99; background-color: #eaf2fb; "
+      "  border-radius: 6px; }"
+    )
+    btn.clicked.connect(lambda: self._show_param_doc_popup(doc_key))
+    return btn
+
+  def _param_label(self, text: str, doc_key: str) -> QWidget:
+    """Pair a parameter text label with a (i) info icon in a single cell.
+
+    The returned :class:`QWidget` plugs into a :class:`QGridLayout` just
+    like a plain :class:`QLabel` did before, keeping the existing 4-column
+    parameter layouts intact.
+    """
+    holder = QWidget()
+    h = QHBoxLayout(holder)
+    h.setContentsMargins(0, 0, 0, 0)
+    h.setSpacing(2)
+    lab = QLabel(text)
+    h.addWidget(lab)
+    h.addWidget(self._param_info_icon(doc_key, parent=holder))
+    h.addStretch(1)
+    return holder
+
+  def _show_param_doc_popup(self, doc_key: str):
+    """Pop up a non-modal info window with the full parameter documentation.
+
+    Triggered when the user clicks the (i) icon — the hover tooltip is good
+    for a quick glance, this dialog suits a longer read and stays open while
+    the user adjusts the value.
+    """
+    from PyQt6.QtWidgets import QMessageBox
+    doc = PARAMETER_DOCS.get(doc_key)
+    if not doc:
+      return
+    box = QMessageBox(self)
+    box.setWindowTitle(doc.get("title", doc_key))
+    box.setIcon(QMessageBox.Icon.Information)
+    box.setTextFormat(Qt.TextFormat.RichText)
+    box.setText(_format_param_tooltip(doc))
+    box.setStandardButtons(QMessageBox.StandardButton.Close)
+    # ``open()`` is non-modal so it does not block 3D interaction.
+    box.open()
+
   def _input_group(self):
-    """CSV / output paths, view mode combo, and Refresh (builds ``self.csv_edit``, ``self.mode``, …)."""
-    g = QGroupBox("Input - Output")
+    """Input/output folders and (hidden) view-mode state holder.
+
+    The view mode is selected from the top bar of the right pane via segmented
+    buttons; ``self.mode`` is kept here as a hidden :class:`QComboBox` purely
+    as a parentless state holder so the rest of the code (which reads
+    ``self.mode.currentText()`` and connects ``currentIndexChanged``) keeps
+    working unchanged.
+    """
+    g = QGroupBox("Input - output")
+    g.setObjectName("topSection")
     l = QGridLayout(g)
+    l.setHorizontalSpacing(6)
+    l.setVerticalSpacing(4)
     self.csv_edit = QLineEdit()
+    self.csv_edit.setPlaceholderText("/path/to/csv/folder")
     b_csv = QPushButton("Browse...")
     b_csv.clicked.connect(self._choose_csv)
     self.out_edit = QLineEdit()
+    self.out_edit.setPlaceholderText("/path/to/output/folder")
     b_out = QPushButton("Browse...")
     b_out.clicked.connect(self._choose_out)
+    # Visual-only filename field (matches the reference design).  Not wired to
+    # ``_export_last_mesh`` to preserve the existing auto-timestamped filename
+    # behavior — i.e. no functional change.
+    self.filename_edit = QLineEdit()
+    self.filename_edit.setPlaceholderText("filename.msh (auto if blank)")
+    self.filename_edit.setToolTip(_format_param_tooltip(PARAMETER_DOCS["filename"]))
+    # Hidden view-mode state holder — segmented buttons in the right pane drive
+    # it via setCurrentText() and the existing _on_view_mode_changed slot.
     self.mode = QComboBox()
     self.mode.addItems(["Centerlines", "Bifurcations", "Mesh", "Fix bifurcation"])
     self.mode.currentIndexChanged.connect(self._on_view_mode_changed)
-    b_refresh = QPushButton("Refresh Preview")
-    b_refresh.clicked.connect(self._refresh)
-    l.addWidget(QLabel("CSV folder"), 0, 0); l.addWidget(self.csv_edit, 0, 1); l.addWidget(b_csv, 0, 2)
+    self.mode.currentTextChanged.connect(self._sync_view_mode_buttons)
+    self.mode.hide()
+    l.addWidget(QLabel("Input folder"), 0, 0); l.addWidget(self.csv_edit, 0, 1); l.addWidget(b_csv, 0, 2)
     l.addWidget(QLabel("Output folder"), 1, 0); l.addWidget(self.out_edit, 1, 1); l.addWidget(b_out, 1, 2)
-    l.addWidget(QLabel("View mode"), 2, 0); l.addWidget(self.mode, 2, 1, 1, 2)
-    l.addWidget(b_refresh, 3, 0, 1, 3)
+    l.addWidget(self._param_label("File name", "filename"), 2, 0)
+    l.addWidget(self.filename_edit, 2, 1, 1, 2)
     return g
+
+  def _build_view_mode_bar(self):
+    """Top bar of the right pane: 'View mode' label + segmented buttons +
+    refresh icon + 'Bifurcation editing' toggle (drives ``self.mode``)."""
+    bar = QWidget()
+    h = QHBoxLayout(bar)
+    h.setContentsMargins(0, 2, 0, 2)
+    h.setSpacing(6)
+    vm_label = QLabel("View mode")
+    vm_label.setObjectName("viewModeLabel")
+    h.addWidget(vm_label)
+
+    seg_row = QHBoxLayout()
+    seg_row.setSpacing(0)
+    seg_row.setContentsMargins(0, 0, 0, 0)
+    # Exclusivity is handled manually in ``_sync_view_mode_buttons`` so that
+    # clicking the already-active segment doesn't toggle it off and so the
+    # 'Bifurcation editing' toggle can be un-checked back into Centerlines.
+    self._view_btn_group = QButtonGroup(self)
+    self._view_btn_group.setExclusive(False)
+
+    def _mk_seg(text, obj_name, role):
+      b = QPushButton(text)
+      b.setObjectName(obj_name)
+      b.setProperty("viewModeRole", role)
+      b.setCheckable(True)
+      b.setAutoExclusive(False)
+      b.setCursor(Qt.CursorShape.PointingHandCursor)
+      b.clicked.connect(lambda _checked, m=role: self._select_view_mode(m))
+      self._view_btn_group.addButton(b)
+      seg_row.addWidget(b)
+      return b
+
+    self._view_btn_centerlines = _mk_seg("Centerlines", "viewSegLeft", "Centerlines")
+    self._view_btn_bifs = _mk_seg("Bifurcations", "viewSegMid", "Bifurcations")
+    self._view_btn_mesh = _mk_seg("Mesh", "viewSegRight", "Mesh")
+    h.addLayout(seg_row)
+
+    self._refresh_btn = QToolButton()
+    self._refresh_btn.setObjectName("refreshBtn")
+    self._refresh_btn.setIcon(
+      self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
+    )
+    self._refresh_btn.setToolTip("Refresh preview")
+    self._refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    self._refresh_btn.clicked.connect(self._refresh)
+    h.addWidget(self._refresh_btn)
+
+    h.addStretch(1)
+
+    self._view_btn_fix = QPushButton("Bifurcation editing")
+    self._view_btn_fix.setObjectName("bifEditBtn")
+    self._view_btn_fix.setCheckable(True)
+    self._view_btn_fix.setCursor(Qt.CursorShape.PointingHandCursor)
+    self._view_btn_fix.clicked.connect(self._on_bif_edit_toggle)
+    self._view_btn_group.addButton(self._view_btn_fix)
+    h.addWidget(self._view_btn_fix)
+
+    # Initial selection mirrors ``self.mode``.
+    self._sync_view_mode_buttons(self.mode.currentText() if self.mode.count() else "Centerlines")
+    return bar
+
+  def _select_view_mode(self, mode_text: str):
+    """Drive ``self.mode`` from a segmented-button click; the existing
+    ``_on_view_mode_changed`` slot does all the real work."""
+    if not hasattr(self, "mode") or self.mode is None:
+      return
+    idx = self.mode.findText(mode_text)
+    if idx < 0:
+      return
+    if self.mode.currentIndex() == idx:
+      # ``currentIndexChanged`` won't fire when the index is unchanged; ensure
+      # the button stays checked (clicking the active segment shouldn't toggle
+      # it off).
+      self._sync_view_mode_buttons(mode_text)
+      # Re-wire Fix bifurcation handlers when the bifurcation-editing toggle
+      # is turned on while the hidden combo already says Fix bifurcation.
+      if mode_text == "Fix bifurcation":
+        self._on_view_mode_changed(idx)
+      return
+    self.mode.setCurrentIndex(idx)
+
+  def _on_bif_edit_toggle(self):
+    """'Bifurcation editing' button: toggle into Fix bifurcation mode, or
+    back to the view active before Fix mode when un-checked.
+
+    Matches the old combo-box behaviour: keep the bifurcation list
+    selection so green branch anchors can be placed immediately.
+    """
+    if self._view_btn_fix.isChecked():
+      if self.mode.currentText() != "Fix bifurcation":
+        self._view_before_fix = self.mode.currentText()
+      self._select_view_mode("Fix bifurcation")
+    else:
+      restore = getattr(self, "_view_before_fix", None) or "Centerlines"
+      if restore == "Fix bifurcation":
+        restore = "Bifurcations"
+      self._select_view_mode(restore)
+
+  def _sync_view_mode_buttons(self, mode_text: str = ""):
+    """Update the segmented-button check states to mirror ``self.mode``."""
+    if not hasattr(self, "_view_btn_centerlines"):
+      return
+    mt = str(mode_text) if mode_text else (self.mode.currentText() if hasattr(self, "mode") else "")
+    pairs = (
+      (self._view_btn_centerlines, "Centerlines"),
+      (self._view_btn_bifs, "Bifurcations"),
+      (self._view_btn_mesh, "Mesh"),
+      (self._view_btn_fix, "Fix bifurcation"),
+    )
+    for btn, name in pairs:
+      btn.blockSignals(True)
+      btn.setChecked(name == mt)
+      btn.blockSignals(False)
 
   def _bifurcation_group(self):
     """Pipeline epsilons, spline sample count, and ``self._bif_edit_group`` (lists + add/remove)."""
-    g = QGroupBox("Bifurcations")
+    g = QGroupBox("Bifurcations panel")
+    g.setObjectName("topSection")
     l = QGridLayout(g)
     self.split_eps = QDoubleSpinBox(); self.split_eps.setDecimals(4); self.split_eps.setRange(0.0001, 10.0); self.split_eps.setValue(0.06); self.split_eps.valueChanged.connect(self._refresh)
+    self.split_eps.setToolTip(_format_param_tooltip(PARAMETER_DOCS["split_edge_eps"]))
     self.use_merge = QCheckBox("Use merge_furcs_proximity"); self.use_merge.setChecked(True); self.use_merge.stateChanged.connect(self._refresh)
+    self.use_merge.setToolTip(_format_param_tooltip(PARAMETER_DOCS["use_merge"]))
     self.merge_eps = QDoubleSpinBox(); self.merge_eps.setDecimals(4); self.merge_eps.setRange(0.0001, 10.0); self.merge_eps.setValue(0.07); self.merge_eps.valueChanged.connect(self._refresh)
-    l.addWidget(QLabel("split_edges eps"), 0, 0); l.addWidget(self.split_eps, 0, 1)
-    l.addWidget(self.use_merge, 1, 0, 1, 2)
-    l.addWidget(QLabel("merge_furcs eps"), 2, 0); l.addWidget(self.merge_eps, 2, 1)
+    self.merge_eps.setToolTip(_format_param_tooltip(PARAMETER_DOCS["merge_furcs_eps"]))
+    l.addWidget(self._param_label("split_edges eps", "split_edge_eps"), 0, 0)
+    l.addWidget(self.split_eps, 0, 1)
+    # The checkbox sits in column 0 next to its own info icon so users can
+    # read what merge_furcs_proximity actually does before toggling it.
+    use_merge_row = QHBoxLayout()
+    use_merge_row.setContentsMargins(0, 0, 0, 0)
+    use_merge_row.setSpacing(2)
+    use_merge_row.addWidget(self.use_merge)
+    use_merge_row.addWidget(self._param_info_icon("use_merge"))
+    use_merge_row.addStretch(1)
+    use_merge_holder = QWidget()
+    use_merge_holder.setLayout(use_merge_row)
+    l.addWidget(use_merge_holder, 1, 0, 1, 2)
+    l.addWidget(self._param_label("merge_furcs eps", "merge_furcs_eps"), 2, 0)
+    l.addWidget(self.merge_eps, 2, 1)
     self._bif_edit_group = self._edit_group()
     l.addWidget(self._bif_edit_group, 3, 0, 1, 2)
     # Let the editing block absorb extra vertical space inside this group box.
@@ -1846,7 +3137,8 @@ class MeshGeneratorWindow(QMainWindow):
 
   def _edit_group(self):
     """Two-column UI: detected bifurcations vs manual edge-ID merges (compact font applied)."""
-    g = QGroupBox("Bifurcation Editing")
+    g = QGroupBox("Bifurcations editing")
+    g.setObjectName("subSection")
     g.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
     root = QVBoxLayout(g)
     self.bif_list = QListWidget()
@@ -1856,10 +3148,10 @@ class MeshGeneratorWindow(QMainWindow):
       QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
     )
     self.bif_list.currentItemChanged.connect(self._on_bif_selected_list)
-    b_del = QPushButton("Delete Selected Bifurcation"); b_del.clicked.connect(self._delete_bif)
-    b_reset = QPushButton("Reset Deleted"); b_reset.clicked.connect(self._reset_deleted)
+    b_del = QPushButton("Delete selection"); b_del.clicked.connect(self._delete_bif)
+    b_reset = QPushButton("Reset"); b_reset.clicked.connect(self._reset_deleted)
     self.add_edit = QLineEdit(); self.add_edit.setPlaceholderText("signed edge IDs, e.g. -3, 7, 12")
-    b_add = QPushButton("Add Bifurcation From IDs"); b_add.clicked.connect(self._add_bif)
+    b_add = QPushButton("Add"); b_add.clicked.connect(self._add_bif)
     self.add_list = QListWidget()
     self.add_list.setMinimumHeight(72)
     self.add_list.setSizePolicy(
@@ -1869,8 +3161,13 @@ class MeshGeneratorWindow(QMainWindow):
     b_cl = QPushButton("Clear Added Bifurcations"); b_cl.clicked.connect(self._clear_add)
     r2 = QHBoxLayout(); r2.addWidget(self.add_edit); r2.addWidget(b_add)
 
+    auto_hdr = QLabel("Automatic detection")
+    auto_hdr.setObjectName("subSectionLabel")
+    auto_hint = QLabel("Large black centroid in 3D, or click red marker")
+    auto_hint.setStyleSheet("color: #555;")
     col_left = QVBoxLayout()
-    col_left.addWidget(QLabel("Detected bifurcations (list → large black centroid in 3D; or click red marker)"))
+    col_left.addWidget(auto_hdr)
+    col_left.addWidget(auto_hint)
     # Merge-candidate checkbox host: one QCheckBox per connected component
     # of the "too-close" overlap graph is injected here by
     # ``_fill_merge_checkboxes`` after each mesh generation.  Empty until a
@@ -1897,11 +3194,18 @@ class MeshGeneratorWindow(QMainWindow):
     self.bif_list_invalid_only.toggled.connect(self._on_bif_invalid_filter_toggled)
     col_left.addWidget(self.bif_list_invalid_only)
     col_left.addWidget(self.bif_list, 1)
-    col_left.addWidget(b_del)
-    col_left.addWidget(b_reset)
+    btn_row = QHBoxLayout()
+    btn_row.addWidget(b_del)
+    btn_row.addWidget(b_reset)
+    col_left.addLayout(btn_row)
 
+    manual_hdr = QLabel("Manual additions")
+    manual_hdr.setObjectName("subSectionLabel")
+    manual_hint = QLabel("Add bifurcations from IDs")
+    manual_hint.setStyleSheet("color: #555;")
     col_right = QVBoxLayout()
-    col_right.addWidget(QLabel("Manual additions"))
+    col_right.addWidget(manual_hdr)
+    col_right.addWidget(manual_hint)
     col_right.addLayout(r2)
     col_right.addWidget(self.add_list, 1)
     col_right.addWidget(b_rm)
@@ -1917,55 +3221,103 @@ class MeshGeneratorWindow(QMainWindow):
 
   def _mesh_group(self):
     """Gmsh / sampling parameters and mesh action buttons (``self.mesh_dx``, …)."""
-    g = QGroupBox("Mesh")
+    g = QGroupBox("Meshing panel")
+    g.setObjectName("topSection")
     l = QGridLayout(g)
     self.mesh_dx = QDoubleSpinBox(); self.mesh_dx.setDecimals(4); self.mesh_dx.setRange(0.0001, 1.0); self.mesh_dx.setValue(0.005)
+    self.mesh_dx.setToolTip(_format_param_tooltip(PARAMETER_DOCS["mesh_dx"]))
     self.mesh_nref = QSpinBox(); self.mesh_nref.setRange(0, 10); self.mesh_nref.setValue(3)
+    self.mesh_nref.setToolTip(_format_param_tooltip(PARAMETER_DOCS["mesh_nref"]))
     self.mesh_rfac = QDoubleSpinBox(); self.mesh_rfac.setDecimals(2); self.mesh_rfac.setRange(0.1, 20.0); self.mesh_rfac.setValue(2.0)
+    self.mesh_rfac.setToolTip(_format_param_tooltip(PARAMETER_DOCS["mesh_rfac"]))
     self.mesh_section_points = QSpinBox()
     self.mesh_section_points.setRange(2, 200)
     self.mesh_section_points.setSingleStep(2)
     self.mesh_section_points.setValue(4)
     self.mesh_section_points.setToolTip(
-      "Number of control points/elements per cross-section direction "
-      "(must be even).")
+      _format_param_tooltip(PARAMETER_DOCS["mesh_section_points"]))
     self.mesh_bl_exp = QDoubleSpinBox()
     self.mesh_bl_exp.setDecimals(2)
     self.mesh_bl_exp.setRange(1.0, 8.0)
     self.mesh_bl_exp.setValue(1.0)
     self.mesh_bl_exp.setSingleStep(0.05)
-    self.mesh_bl_exp.setToolTip(
-      "Radial grading on the unit disc: 1 = uniform; larger values push hex sampling "
-      "toward the wall (boundary-layer-style clustering in parameter space).")
+    self.mesh_bl_exp.setToolTip(_format_param_tooltip(PARAMETER_DOCS["mesh_bl_exp"]))
     self.mesh_union_eps = QDoubleSpinBox()
     self.mesh_union_eps.setDecimals(9)
     self.mesh_union_eps.setRange(1e-9, 1e-2)
     self.mesh_union_eps.setValue(1e-8)
     self.mesh_union_eps.setSingleStep(1e-9)
-    self.mesh_union_eps.setToolTip(
-      "KD-tree tolerance for mesh_union when gluing vessel and bifurcation volumes.")
+    self.mesh_union_eps.setToolTip(_format_param_tooltip(PARAMETER_DOCS["mesh_union_eps"]))
     self.bif_exploit_symmetry = QCheckBox("Bif exploit symmetry")
-    self.bif_exploit_symmetry.setToolTip("Experimental: may help symmetric bifurcation frame alignment.")
+    self.bif_exploit_symmetry.setToolTip(
+      _format_param_tooltip(PARAMETER_DOCS["bif_exploit_symmetry"]))
     self.b_gen = QPushButton("Generate Mesh"); self.b_gen.clicked.connect(self._generate_export_open)
     self.b_stop_gen = QPushButton("Stop Mesh Generation")
     self.b_stop_gen.setEnabled(False)
     self.b_stop_gen.clicked.connect(self._stop_mesh_generation)
-    b_valid = QPushButton("Check Mesh Validity"); b_valid.clicked.connect(self._check_valid)
+    b_valid = QPushButton("Check mesh validity"); b_valid.clicked.connect(self._check_valid)
     b_export = QPushButton("Export .msh"); b_export.clicked.connect(self._export_last_mesh)
-    r1 = QHBoxLayout(); r1.addWidget(self.b_gen); r1.addWidget(self.b_stop_gen); r1.addWidget(b_export)
-    r2 = QHBoxLayout(); r2.addWidget(b_valid)
-    l.addWidget(QLabel("dx"), 0, 0); l.addWidget(self.mesh_dx, 0, 1)
-    l.addWidget(QLabel("nref"), 1, 0); l.addWidget(self.mesh_nref, 1, 1)
-    l.addWidget(QLabel("rfac"), 2, 0); l.addWidget(self.mesh_rfac, 2, 1)
-    l.addWidget(QLabel("section points"), 3, 0); l.addWidget(self.mesh_section_points, 3, 1)
-    l.addWidget(QLabel("BL exp"), 4, 0); l.addWidget(self.mesh_bl_exp, 4, 1)
-    l.addWidget(QLabel("union ε"), 5, 0); l.addWidget(self.mesh_union_eps, 5, 1)
-    l.addWidget(self.bif_exploit_symmetry, 6, 0, 1, 2)
-    l.addLayout(r1, 7, 0, 1, 2); l.addLayout(r2, 8, 0, 1, 2)
+    # 4-column grid (label | spin | label | spin) for compact 2-column rows.
+    # Each label is the parameter name + a (i) info icon — clicking the icon
+    # pops up the full documentation; hovering shows a tooltip preview.
+    l.addWidget(self._param_label("dx", "mesh_dx"), 0, 0); l.addWidget(self.mesh_dx, 0, 1)
+    l.addWidget(self._param_label("BL exp", "mesh_bl_exp"), 0, 2); l.addWidget(self.mesh_bl_exp, 0, 3)
+    l.addWidget(self._param_label("section points", "mesh_section_points"), 1, 0); l.addWidget(self.mesh_section_points, 1, 1)
+    l.addWidget(self._param_label("union ε", "mesh_union_eps"), 1, 2); l.addWidget(self.mesh_union_eps, 1, 3)
+    l.addWidget(self._param_label("nref", "mesh_nref"), 2, 0); l.addWidget(self.mesh_nref, 2, 1)
+    l.addWidget(self._param_label("rfac", "mesh_rfac"), 2, 2); l.addWidget(self.mesh_rfac, 2, 3)
+    bif_sym_row = QHBoxLayout()
+    bif_sym_row.setContentsMargins(0, 0, 0, 0)
+    bif_sym_row.setSpacing(2)
+    bif_sym_row.addWidget(self.bif_exploit_symmetry)
+    bif_sym_row.addWidget(self._param_info_icon("bif_exploit_symmetry"))
+    bif_sym_row.addStretch(1)
+    bif_sym_holder = QWidget()
+    bif_sym_holder.setLayout(bif_sym_row)
+    l.addWidget(bif_sym_holder, 3, 0, 1, 4)
+    l.addWidget(self.b_gen, 4, 0, 1, 4)
+    l.addWidget(self.b_stop_gen, 5, 0, 1, 4)
+    r_actions = QHBoxLayout(); r_actions.addWidget(b_valid); r_actions.addWidget(b_export)
+    l.addLayout(r_actions, 6, 0, 1, 4)
+    self._mesh_stats_hdr = QLabel("Last mesh statistics")
+    self._mesh_stats_hdr.setStyleSheet("color: #555;")
     self.mesh_stats_label = QLabel("—")
     self.mesh_stats_label.setWordWrap(True)
-    l.addWidget(QLabel("Last mesh statistics"), 9, 0, 1, 2)
-    l.addWidget(self.mesh_stats_label, 10, 0, 1, 2)
+    l.addWidget(self._mesh_stats_hdr, 7, 0, 1, 4)
+    l.addWidget(self.mesh_stats_label, 8, 0, 1, 4)
+    # Live progress panel — shown only while a mesh run is active.  It
+    # occupies the same grid rows as the stats header/label and toggled
+    # via ``_show_progress_panel``/`_show_stats_panel` so the meshing
+    # group keeps a constant size.
+    self._progress_hdr = QLabel("Mesh generation in progress")
+    self._progress_hdr.setStyleSheet("color: #1a5fb4; font-weight: 600;")
+    self._progress_stage_label = QLabel("Initializing…")
+    self._progress_stage_label.setWordWrap(True)
+    self._progress_stage_label.setStyleSheet("color: #333;")
+    self._progress_bar = QProgressBar()
+    # 0..N steps; while no progress event has arrived yet, we set the bar
+    # to indeterminate mode (range = (0, 0)) so it animates a busy stripe
+    # right from click time.
+    self._progress_bar.setRange(0, 0)
+    self._progress_bar.setTextVisible(True)
+    self._progress_bar.setFormat("Starting…")
+    self._progress_elapsed_label = QLabel("Elapsed: 0s")
+    self._progress_elapsed_label.setStyleSheet("color: #666;")
+    l.addWidget(self._progress_hdr, 7, 0, 1, 4)
+    l.addWidget(self._progress_stage_label, 8, 0, 1, 4)
+    l.addWidget(self._progress_bar, 9, 0, 1, 4)
+    l.addWidget(self._progress_elapsed_label, 10, 0, 1, 4)
+    self._progress_hdr.setVisible(False)
+    self._progress_stage_label.setVisible(False)
+    self._progress_bar.setVisible(False)
+    self._progress_elapsed_label.setVisible(False)
+    # Drives the elapsed-time label so the indicator visibly advances
+    # even during long single stages (e.g. the volume-mesh stage which
+    # can run for many seconds inside numba code).
+    self._progress_elapsed_timer = QTimer(self)
+    self._progress_elapsed_timer.setInterval(250)
+    self._progress_elapsed_timer.timeout.connect(self._tick_progress_elapsed)
+    self._progress_started_ms = None
     return g
 
   def _fix_bif_group(self):
@@ -2200,7 +3552,17 @@ class MeshGeneratorWindow(QMainWindow):
       pass
 
   def _reload_preview_data(self):
-    """Reload centerlines CSVs and rebuild the vascular graph + bif lists."""
+    """Reload centerlines CSVs and rebuild the vascular graph + bif lists.
+
+    Keeps every centerline-id-dependent UI surface in lockstep: the centerline
+    ID map (right pane), the bifurcation editing list (left pane), the
+    manual-additions list and the post-mesh merge-candidate checkboxes are all
+    repopulated from the freshly-built :class:`VascularGraph`.  Any caller that
+    mutates centerline state (delete / restore, manual addition, parameter
+    change) only has to call this method to make every dependent view follow
+    along automatically — the bifurcation panel will no longer lag behind the
+    centerline ID map after a topology edit.
+    """
     folder = self.csv_edit.text().strip()
     if not folder or not os.path.isdir(folder):
       self._set_status("Select a valid CSV folder.")
@@ -2212,8 +3574,26 @@ class MeshGeneratorWindow(QMainWindow):
     else:
       self._graph_for_bif_ui = None
       self._merged_bif_unsigned_keys = frozenset()
+    # Drop a stale selected_bif_key if the bif it pointed to no longer exists
+    # in the freshly-built graph — otherwise the bif_list selection drifts out
+    # of sync with the 3D bif view after a topology edit (the highlight stays
+    # on the now-missing junction and 3D picks fail to surface a corresponding
+    # row).
+    if self._selected_bif_key is not None:
+      g_check = self._graph_for_bif_list_and_3d()
+      live_keys = {
+        frozenset(int(v) for v in furc.indices)
+        for furc in g_check.nontrivial_furcations
+      }
+      if self._selected_bif_key not in live_keys:
+        self._selected_bif_key = None
     self._fill_bif_list()
     self._fill_add_list()
+    # Refresh merge-candidate checkboxes too — ``_merge_components`` lives on
+    # the last successful mesh so a centerline edit (which clears the cached
+    # mesh) leaves the panel showing stale rows unless we rebuild it now.
+    if hasattr(self, "_merge_panel"):
+      self._fill_merge_checkboxes()
     return True
 
   def _on_view_mode_changed(self, index):
@@ -2863,6 +4243,14 @@ class MeshGeneratorWindow(QMainWindow):
         self._set_status("Mesh preview: full boundary surface (edges + vertices) + statistics in the Mesh panel.")
       return
     if mode == "Bifurcations":
+      # Always rebuild the bif list/edits panel from the *current* graph so
+      # the left-side panel and the 3D bifurcation view stay in lockstep
+      # after any topology change (centerline delete/restore, parameter
+      # nudge, merge-candidate toggle, etc.).
+      self._fill_bif_list()
+      self._fill_add_list()
+      if hasattr(self, "_merge_panel"):
+        self._fill_merge_checkboxes()
       invalid_keys = frozenset(
         k for k, v in (self._bif_validity or {}).items() if not v
       )
@@ -3051,8 +4439,8 @@ class MeshGeneratorWindow(QMainWindow):
       )
 
   def _generate_export_open(self):
-    """Start :class:`MeshComputeThread` with a snapshot of current UI parameters."""
-    if self._mesh_thread is not None and self._mesh_thread.isRunning():
+    """Start :class:`MeshComputeProcess` with a snapshot of current UI parameters."""
+    if self._mesh_thread is not None and self._mesh_worker_is_running():
       self._set_status("Mesh generation already in progress.")
       return
     folder = self.csv_edit.text().strip()
@@ -3115,81 +4503,6 @@ class MeshGeneratorWindow(QMainWindow):
     elif not self._merge_opt_in:
       self._last_merge_opt_in = ()
 
-    def work():
-      mesh = generate_mesh(**kw)
-      bpts = _extract_boundary_points_for_preview(mesh)
-      stats = mesh_statistics(mesh)
-      bwire, bscatter, bfaces = _boundary_preview_arrays(mesh)
-      # Per-bifurcation validity is attached by ``make_spline_mesh`` as
-      # ``mesh.bif_validity = ((key, bool, repair_or_None), ...)`` (older
-      # builds emit 2-tuples without the repair slot).  Normalise to a dict
-      # ``{frozenset_key: {"valid": bool, "repair": dict | None}}`` — the
-      # richer value lets the bif list show *why* a bifurcation is
-      # still red (no cascade entry worked) or reassure the user which
-      # per-branch rfac combination fixed it.
-      raw = getattr(mesh, "bif_validity", ())
-      bvalid: dict = {}
-      for entry in raw:
-        if len(entry) == 2:
-          k, v = entry
-          repair = None
-        else:
-          k, v, repair = entry[0], entry[1], entry[2] if len(entry) > 2 else None
-        bvalid[frozenset(int(i) for i in k)] = {
-          "valid": bool(v),
-          "repair": repair,
-          "overlaps": [],
-        }
-      # Per-edge overlap detection from ``make_spline_mesh``: edges where
-      # the two adjacent bifurcations are so close that ``rtruncate`` had
-      # to clamp the vessel stub between them — merge candidates for a
-      # single n-furcation.  Fold the info into the per-bif dict so every
-      # offending bif shows its partner(s) in the list tooltip.
-      for ov in getattr(mesh, "bif_overlaps", ()):
-        bs = ov.get("bif_start")
-        be = ov.get("bif_end")
-        if bs is None or be is None:
-          # Terminal edge — no partner bif.  Still worth recording on the
-          # single attached bif so the user sees the short-stub warning.
-          attached = bs or be
-          if attached is None:
-            continue
-          bvalid.setdefault(attached, {
-            "valid": True, "repair": None, "overlaps": [],
-          })["overlaps"].append({
-            "iedge": int(ov["iedge"]),
-            "remaining_fraction": float(ov["remaining_fraction"]),
-            "other": None,
-          })
-          continue
-        info = {
-          "iedge": int(ov["iedge"]),
-          "remaining_fraction": float(ov["remaining_fraction"]),
-        }
-        bvalid.setdefault(bs, {
-          "valid": True, "repair": None, "overlaps": [],
-        })["overlaps"].append({**info, "other": be})
-        bvalid.setdefault(be, {
-          "valid": True, "repair": None, "overlaps": [],
-        })["overlaps"].append({**info, "other": bs})
-      # Connected components of the merge-candidate graph — one checkbox
-      # per component gets rendered at the top of the Bifurcations panel.
-      # Each item is a plain dict so it survives signal marshalling
-      # untouched; sets/frozensets in the items are already hashable and
-      # picklable.
-      components_raw = getattr(mesh, "merge_components", ()) or ()
-      merge_components = [
-        {
-          "component_id": comp["component_id"],
-          "bif_keys": tuple(
-            frozenset(int(i) for i in k) for k in comp["bif_keys"]
-          ),
-          "internal_edges": tuple(sorted(int(i) for i in comp["internal_edges"])),
-        }
-        for comp in components_raw
-      ]
-      return mesh, bpts, stats, bwire, bscatter, bfaces, bvalid, merge_components
-
     self.b_gen.setEnabled(False)
     self.b_stop_gen.setEnabled(True)
     if self._pending_fix_anchor_mesh:
@@ -3199,14 +4512,26 @@ class MeshGeneratorWindow(QMainWindow):
         f"{nfa} junction(s); no rfac repair scan on this run…"
       )
     else:
-      self._set_status("Generating mesh in background… You can keep using the window.")
-    QApplication.processEvents()
-    th = MeshComputeThread(work)
-    self._mesh_thread = th
-    th.finished_ok.connect(self._on_mesh_thread_ok)
-    th.finished_err.connect(self._on_mesh_thread_err)
-    th.finished.connect(self._on_mesh_thread_finished)
-    th.start()
+      self._set_status(
+        "Generating mesh in a background process… "
+        "Click 'Stop Mesh Generation' to cancel at any time."
+      )
+    # Swap the Meshing-panel display from the previous run's "Last mesh
+    # statistics" line to the live progress widgets.  We deliberately do
+    # NOT clear ``self.last_mesh`` here — keeping the previous mesh in
+    # memory means Export / Check-validity stay usable during the new
+    # run, and we can restore the stats display verbatim if this run is
+    # cancelled or fails (see ``_on_mesh_thread_err`` / ``_stop_mesh_generation``).
+    self._show_progress_panel()
+    # Use a subprocess so cancellation is instant (SIGTERM/SIGKILL) and
+    # the GUI never has to ``wait()`` on a native-code thread.
+    proc = MeshComputeProcess(kw, parent=self)
+    self._mesh_thread = proc
+    proc.progress.connect(self._on_mesh_progress)
+    proc.finished_ok.connect(self._on_mesh_thread_ok)
+    proc.finished_err.connect(self._on_mesh_thread_err)
+    proc.finished.connect(self._on_mesh_thread_finished)
+    proc.start()
 
   def _on_mesh_thread_ok(self, mesh, bpts, stats, bwire, bscatter, bfaces,
                          bvalid, merge_components=()):
@@ -3331,21 +4656,72 @@ class MeshGeneratorWindow(QMainWindow):
   def _on_mesh_thread_finished(self):
     self.b_gen.setEnabled(True)
     self.b_stop_gen.setEnabled(False)
+    # Always restore the stats panel here — this slot fires on success,
+    # error, AND cancellation (via ``MeshComputeProcess._finalise``), so
+    # putting the swap here covers every termination path with a single
+    # line.  On success ``_on_mesh_thread_ok`` already wrote the new
+    # values into ``mesh_stats_label`` while it was hidden; on err/cancel
+    # the label still holds the previous run's stats.
+    self._show_stats_panel()
     th = self._mesh_thread
     self._mesh_thread = None
     if th is not None:
       th.deleteLater()
 
+  def _mesh_worker_is_running(self) -> bool:
+    """Compatibility check covering both :class:`MeshComputeThread` (legacy,
+    ``isRunning()``) and :class:`MeshComputeProcess` (``is_running()``)."""
+    th = self._mesh_thread
+    if th is None:
+      return False
+    is_running = getattr(th, "is_running", None)
+    if callable(is_running):
+      return bool(is_running())
+    is_running_thread = getattr(th, "isRunning", None)
+    if callable(is_running_thread):
+      return bool(is_running_thread())
+    return False
+
   def _stop_mesh_generation(self):
-    if self._mesh_thread is None or not self._mesh_thread.isRunning():
+    """Cancel the running mesh worker immediately, without blocking the GUI.
+
+    For the subprocess worker this is a SIGTERM/SIGKILL (no ``join()`` on
+    the GUI thread); the worker's ``finished`` signal then re-enables the
+    buttons via :meth:`_on_mesh_thread_finished`.  Legacy thread workers
+    fall back to ``terminate()`` with a tiny non-blocking ``wait`` and we
+    deliberately re-enable the buttons up-front so the user can carry on.
+    """
+    th = self._mesh_thread
+    if th is None or not self._mesh_worker_is_running():
       self._set_status("No mesh generation is currently running.")
       self.b_stop_gen.setEnabled(False)
       return
     self._set_status("Stopping mesh generation…")
-    # Work function is CPU-bound and does not poll interruption flags.
-    # Use terminate as an emergency stop from the GUI.
-    self._mesh_thread.terminate()
-    self._mesh_thread.wait(5000)
+    # Re-enable user controls right away — cancellation should *feel*
+    # instant even if reaping the worker process trails by a few ms.
+    self.b_stop_gen.setEnabled(False)
+    self.b_gen.setEnabled(True)
+    # Immediate feedback in the progress panel — the worker SIGTERM grace
+    # is short (~200 ms) but we want the user to *see* the cancellation
+    # registered the moment they click Stop, even if ``_on_mesh_thread_finished``
+    # trails by a few frames.
+    if hasattr(self, "_progress_bar") and self._progress_bar.isVisible():
+      self._progress_stage_label.setText("Cancelling…")
+      self._progress_bar.setRange(0, 0)
+      self._progress_bar.setFormat("Cancelling…")
+    stop_fn = getattr(th, "stop", None)
+    if callable(stop_fn):
+      stop_fn()
+      return
+    # Legacy QThread path: terminate without a long wait().
+    try:
+      th.terminate()
+    except Exception:
+      pass
+    try:
+      th.wait(50)
+    except Exception:
+      pass
 
   def keyPressEvent(self, event):
     if (
@@ -3359,11 +4735,29 @@ class MeshGeneratorWindow(QMainWindow):
     super().keyPressEvent(event)
 
   def closeEvent(self, event):
-    """Block exit until the mesh worker finishes (avoids tearing down mid-build)."""
-    if self._mesh_thread is not None and self._mesh_thread.isRunning():
-      self._set_status("Waiting for mesh generation to finish before closing…")
+    """Tear down the mesh worker promptly so closing the window never hangs.
+
+    The subprocess worker is killed via SIGTERM (then SIGKILL after a tiny
+    grace), which is safe because the worker shares no in-process state
+    with the GUI; the kernel reclaims its memory.  Legacy thread workers
+    are terminated without a long ``wait()``.
+    """
+    th = self._mesh_thread
+    if th is not None and self._mesh_worker_is_running():
+      self._set_status("Cancelling mesh generation before closing…")
       QApplication.processEvents()
-      self._mesh_thread.wait(600_000)
+      stop_fn = getattr(th, "stop", None)
+      if callable(stop_fn):
+        stop_fn()
+      else:
+        try:
+          th.terminate()
+        except Exception:
+          pass
+        try:
+          th.wait(50)
+        except Exception:
+          pass
     event.accept()
 
   def _export_last_mesh(self):
@@ -3375,12 +4769,15 @@ class MeshGeneratorWindow(QMainWindow):
       self._set_status("Please select an output folder.")
       return
     os.makedirs(out, exist_ok=True)
+    user_name = self.filename_edit.text().strip() if hasattr(self, "filename_edit") else ""
     try:
-      path = self._save_msh(self.last_mesh, out)
+      path = self._save_msh(self.last_mesh, out, custom_name=user_name)
       self.last_mesh_path = path
       self._set_status(f"Mesh exported: {path}")
     except Exception:
-      self._set_status(f"Export error: {traceback.format_exc().splitlines()[-1]}")
+      traceback.print_exc()
+      err = traceback.format_exc().splitlines()[-1]
+      self._set_status(f"Export error: {err}")
 
   def _check_valid(self):
     if self.last_mesh is None:
@@ -3391,11 +4788,321 @@ class MeshGeneratorWindow(QMainWindow):
     except Exception:
       self._set_status(f"Mesh validity error: {traceback.format_exc().splitlines()[-1]}")
 
-  def _save_msh(self, mesh, out_folder):
-    path = os.path.join(out_folder, f"partery_mesh_{datetime.now().strftime('%Y%m%d_%H%M%S')}.msh")
+  # ----------------------------------------------------------------------
+  # CFD-compatible boundary tagging on export
+  # ----------------------------------------------------------------------
+  def _terminal_cap_specs(self):
+    """List terminal cross-sections of the volumetric mesh.
+
+    Rebuilds the same :class:`SplineGraph` that produced ``self.last_mesh``
+    (post-merge, post-fix-anchor, post-rfac truncation) and walks its
+    nontrivial furcations to figure out which signed branch endpoints are
+    *not* attached to any bifurcation — those endpoints are the terminal
+    caps where the volumetric mesh ends in a flat disc that a CFD solver
+    will treat as an inlet or outlet.
+
+    Returns
+    -------
+    caps : list of ``(tag, center_xyz, normal_xyz, radius)``
+        ``tag`` is a stable string of the form ``"section_<id>"`` (positive
+        terminal end) or ``"section_<id>_start"`` (negative terminal end),
+        where ``<id>`` is the post-merge graph edge id; ``center`` and
+        ``normal`` are the centerline endpoint and its **outward** unit
+        tangent on the spline; ``radius`` is the local vessel radius used
+        as the in-plane size tolerance.
+    """
+    if self.last_mesh is None:
+      return []
+    folder = self.csv_edit.text().strip()
+    if not folder or not os.path.isdir(folder):
+      return []
+    try:
+      from mesh import apply_merge_opt_in_vgraph, _compute_truncate_dict
+      artery = build_graph(
+        folder,
+        self.split_eps.value(),
+        self.merge_eps.value(),
+        self.use_merge.isChecked(),
+        self._removed_bif_keys,
+        self._manual_additions,
+        removed_centerline_ids=frozenset(self._removed_centerline_ids),
+      )
+      artery = artery.orient_nontrivial()
+      artery, _ = apply_merge_opt_in_vgraph(
+        artery, self._opt_in_components_from_ui() or list(self._last_merge_opt_in or ()),
+      )
+      # Apply any completed fix-anchor specs so terminal cap geometry tracks
+      # the same vessel trims the mesh was actually built with.
+      fix_anchor_specs = self._complete_fix_anchor_specs()
+      for fk_raw, adict in sorted(
+        fix_anchor_specs,
+        key=lambda sp: tuple(sorted(abs(int(x)) for x in sp[0])),
+      ):
+        fk = frozenset(int(i) for i in fk_raw)
+        need = {abs(int(x)) for x in fk}
+        if need != {int(k) for k in adict.keys()}:
+          continue
+        anchors = {
+          int(k): np.asarray(v, dtype=float).reshape(3)
+          for k, v in adict.items()
+        }
+        artery = apply_fix_branch_anchors_to_vgraph(artery, fk, anchors)
+      artery = (
+        artery.align_nontrivial_normals()
+        .orient_trivial()
+        .rtruncate(1)
+        .furcomplete(npoints=1001)
+        .delete_twofurcations()
+        .align_frames()
+      )
+      dx = float(self.mesh_dx.value())
+      nref = int(self.mesh_nref.value())
+      rfac = float(self.mesh_rfac.value())
+      sgraph = artery.to_spline_graph(dx=dx)
+      xis = [e.knotvector[0].refine(nref).knots for e in sgraph.edges]
+      xidict = dict(zip(sgraph.indices, xis))
+      trunc = _compute_truncate_dict(sgraph, xis, xidict, rfac)
+      sgraph = sgraph.truncate_edges(trunc)
+    except Exception:
+      return []
+
+    # Build the set of bif-attached signed branches once.
+    attached_signs: dict[int, set] = {int(i): set() for i in sgraph.indices}
+    for furc in sgraph.nontrivial_furcations:
+      for s in furc.indices:
+        attached_signs.setdefault(abs(int(s)), set()).add(int(s))
+
+    caps: list[tuple[str, np.ndarray, np.ndarray, float]] = []
+    for iedge, edge in zip(sgraph.indices, sgraph.edges):
+      signs = attached_signs.get(int(iedge), set())
+      xi_a, xi_b = edge.interval
+      for tag_suffix, xi, sign in (
+        ("_start", float(xi_a), -1),  # terminal at the edge's start (xi=a)
+        ("",       float(xi_b), +1),  # terminal at the edge's end   (xi=b)
+      ):
+        # Side is terminal iff the matching signed branch is *not* listed in
+        # any nontrivial furcation — those are the free vessel ends that the
+        # volumetric mesh closes with a flat disc.
+        signed = sign * int(iedge)
+        if signed in signs:
+          continue
+        try:
+          center = np.asarray(edge.cline([xi]), dtype=float).ravel()[:3]
+          tangent = np.asarray(edge.cline([xi], dx=1), dtype=float).ravel()[:3]
+          radius = float(np.asarray(edge.radius([xi])).ravel()[0])
+        except Exception:
+          continue
+        tn = float(np.linalg.norm(tangent))
+        if tn < 1e-12 or not np.isfinite(radius) or radius <= 0:
+          continue
+        # Make the normal point *outward* (away from the vessel interior):
+        # at xi=xi_b the spline tangent already points outward; at xi=xi_a
+        # we flip it.
+        normal = (sign * tangent / tn)
+        tag = f"section_{int(iedge)}{tag_suffix}"
+        caps.append((tag, center, normal, radius))
+    return caps
+
+  # ------------------------------------------------------------------ #
+  # Cross-section / wall mask helpers
+  # ------------------------------------------------------------------ #
+  # Selecters return **integer indices** (not bool masks) because
+  # ``Mesh.take_elements`` → ``Mesh.take`` converts bool arrays to a
+  # ``[0, 1]`` fancy index and triggers duplicate-element errors in older
+  # pyhaemo builds.
+  @staticmethod
+  def _boundary_face_geom(verts):
+    """Centroids and unit normals for boundary quads (or triangles)."""
+    v = np.asarray(verts, dtype=float)
+    v3 = v[:, :, :3]
+    cent = v3.mean(axis=1)
+    e0 = v3[:, 1] - v3[:, 0]
+    e1 = v3[:, 2] - v3[:, 0]
+    fn = np.cross(e0, e1)
+    nn = np.linalg.norm(fn, axis=1, keepdims=True)
+    fn = np.divide(fn, nn, out=np.zeros_like(fn), where=nn > 1e-15)
+    return cent, fn
+
+  def _cap_candidate_mask(self, verts, *, c, n, r, dx_thickness):
+    """Faces that geometrically resemble a flat outlet/inlet cap disc.
+
+    Cylindrical wall quads adjacent to a cap share the same radial distance
+    from the cap centre (~``r``) but have face normals nearly perpendicular
+    to the cap normal and vertices offset by ~``dx`` along the vessel axis.
+    """
+    v = np.asarray(verts, dtype=float)
+    if v.ndim != 3 or v.shape[2] < 3 or v.shape[0] == 0:
+      return np.zeros(0 if v.ndim < 1 else v.shape[0], dtype=bool)
+    c = np.asarray(c, dtype=float).reshape(3)
+    n = np.asarray(n, dtype=float).reshape(3)
+    n_norm = float(np.linalg.norm(n))
+    if n_norm < 1e-12:
+      return np.zeros(v.shape[0], dtype=bool)
+    n = n / n_norm
+    r = float(r)
+    dx = max(float(dx_thickness), 1e-6)
+    # Axial tolerance tracks mesh spacing only — not vessel radius.
+    thickness_tol = max(dx * 0.75, 1e-6)
+    radial_tol = r + 0.5 * dx
+    v3 = v[:, :, :3]
+    cent, fn = self._boundary_face_geom(v)
+    delta = v3 - c[None, None, :]
+    along_v = np.einsum("ijk,k->ij", delta, n)
+    orth_v = delta - along_v[:, :, None] * n[None, None, :]
+    orth_v_norm = np.linalg.norm(orth_v, axis=2)
+    along_c = (cent - c) @ n
+    orth_c = np.linalg.norm(cent - c - along_c[:, None] * n, axis=1)
+    # Mesh cap normals may oppose the graph outward normal on some terminals.
+    align = np.abs(fn @ n)
+    return (
+      (align > 0.82)
+      & (np.abs(along_c) <= thickness_tol)
+      & (np.max(np.abs(along_v), axis=1) <= thickness_tol)
+      & (orth_c <= radial_tol)
+      & (np.max(orth_v_norm, axis=1) <= radial_tol)
+    )
+
+  def _partition_boundary_faces(self, verts, caps, dx_thickness):
+    """Assign each boundary face to exactly one cap tag or ``wall``.
+
+    When several caps pass the geometric gates (rare), the face is attached
+    to the cap whose centroid lies closest to the cap plane.
+    """
+    v = np.asarray(verts, dtype=float)
+    nfaces = 0 if v.ndim < 3 else v.shape[0]
+    if nfaces == 0 or not caps:
+      return {}
+    cent, _ = self._boundary_face_geom(v)
+    assignment = np.full(nfaces, -1, dtype=int)
+    best_score = np.full(nfaces, np.inf)
+    cap_tags: list[str] = []
+    for icap, (tag, center, normal, radius) in enumerate(caps):
+      cap_tags.append(tag)
+      c = np.asarray(center, dtype=float).reshape(3)
+      n = np.asarray(normal, dtype=float).reshape(3)
+      r = float(radius)
+      cand = self._cap_candidate_mask(
+        v, c=c, n=n, r=r, dx_thickness=dx_thickness,
+      )
+      along_c = (cent - c) @ n
+      score = np.abs(along_c)
+      improve = cand & (score < best_score)
+      best_score[improve] = score[improve]
+      assignment[improve] = icap
+    out: dict[str, np.ndarray] = {
+      tag: np.unique(np.where(assignment == icap)[0]).astype(int)
+      for icap, tag in enumerate(cap_tags)
+    }
+    out["wall"] = np.unique(np.where(assignment < 0)[0]).astype(int)
+    return out
+
+  def _build_export_surface_tags(self, mesh):
+    """Construct the ``surface_tags`` dict for :func:`export_gmsh`.
+
+    Tags emitted:
+
+    * ``"wall"`` – every external boundary face that is **not** on a
+      cross-section (i.e. the vessel walls a CFD solver will treat as the
+      no-slip surface).
+    * ``"section_<id>"`` (and ``"section_<id>_start"`` for the opposite
+      terminal end) – one tag per inlet/outlet cap, with ``<id>`` the
+      unsigned graph edge id of that terminal vessel.
+
+    Every selecter returned by this function yields an **integer-index
+    array** (not a bool mask) so the buggy ``Mesh.take_elements`` →
+    ``Mesh.take`` chain in the installed ``pyhaemo`` (which converts bool
+    → ``[0, 1]`` fancy index and trips a "Duplicate element detected"
+    assertion) handles the result correctly.
+
+    The volumetric ``"Volume"`` physical group is added by
+    :func:`pyhaemo.mesh.export.export_gmsh` itself, so this method only
+    has to provide the surface tags.
+    """
+    caps = self._terminal_cap_specs()
+    if not caps:
+      return {}
+    dx_thickness = float(
+      self.mesh_dx.value() if hasattr(self, "mesh_dx") else 0.0
+    )
+    bmesh = mesh.boundary
+    verts = bmesh.points[bmesh.elements]
+    indices_by_tag = self._partition_boundary_faces(
+      verts, caps, dx_thickness,
+    )
+    surface_tags: dict = {}
+    for tag in (t for t, *_ in caps):
+      idx = indices_by_tag.get(tag, np.array([], dtype=int))
+
+      def _selecter(_verts, _idx=idx):
+        return _idx
+
+      surface_tags[tag] = _selecter
+    wall_idx = indices_by_tag.get("wall", np.array([], dtype=int))
+
+    def wall_selecter(_verts, _idx=wall_idx):
+      return _idx
+
+    # Wall last so physical-group order stays section_* then wall.
+    surface_tags["wall"] = wall_selecter
+    return surface_tags
+
+  def _save_msh(self, mesh, out_folder, custom_name: str = ""):
+    """Export ``mesh`` as Gmsh ``.msh`` into ``out_folder``.
+
+    If ``custom_name`` is non-empty it is used verbatim (a ``.msh`` extension
+    is appended when missing, and any directory separators are stripped so
+    we never write outside ``out_folder``).  Otherwise we fall back to the
+    legacy auto-timestamped name.
+
+    Adds CFD-compatible boundary tagging automatically:
+
+    * a ``"Volume"`` physical group covering every volumetric cell
+      (created by :func:`pyhaemo.mesh.export.export_gmsh`);
+    * a ``"wall"`` surface group covering every exterior boundary face
+      that is **not** on an inlet/outlet cross-section;
+    * one ``"section_<id>"`` surface group per terminal cross-section so
+      a CFD or FEM solver can apply per-section boundary conditions.
+
+    If the spline-graph rebuild needed to identify cross-sections fails for
+    any reason (unusual graph topology, etc.) we fall back to a plain
+    unlabelled export so the user still gets a mesh file.
+    """
+    name = (custom_name or "").strip()
+    if name:
+      # Strip any path components — the output directory is fixed by
+      # ``out_folder`` and we don't want a user-typed filename to escape
+      # it (e.g. "../oops.msh").
+      name = os.path.basename(name)
+      # Default to .msh if no recognised extension; preserve a user-typed
+      # extension otherwise so power users can still write e.g. .msh2.
+      root, ext = os.path.splitext(name)
+      if not root:
+        name = f"partery_mesh_{datetime.now().strftime('%Y%m%d_%H%M%S')}.msh"
+      elif not ext:
+        name = root + ".msh"
+    else:
+      name = f"partery_mesh_{datetime.now().strftime('%Y%m%d_%H%M%S')}.msh"
+    path = os.path.join(out_folder, name)
     if not hasattr(mesh, "export_gmsh"):
       raise RuntimeError(f"Generated object type {type(mesh).__name__} does not support export_gmsh().")
-    mesh.export_gmsh(path)
+    # Tag and export the same compact mesh (contiguous nodes 0…n-1) so face
+    # indices from partitioning match what export_gmsh writes to Gmsh.
+    mesh = mesh.drop_points_and_renumber()
+    surface_tags = {}
+    try:
+      surface_tags = self._build_export_surface_tags(mesh)
+    except Exception:
+      # Diagnostic-only: never block an export because the tagging failed.
+      traceback.print_exc()
+      surface_tags = {}
+    if surface_tags:
+      mesh.export_gmsh(path, surface_tags=surface_tags)
+      n_sections = sum(1 for t in surface_tags if t.startswith("section_"))
+      self._set_status(
+        f"Mesh exported with CFD tags: Volume + wall + {n_sections} cross-section(s)."
+      )
+    else:
+      mesh.export_gmsh(path)
     return path
 
 

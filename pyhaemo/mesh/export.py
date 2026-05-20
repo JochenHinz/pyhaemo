@@ -36,6 +36,12 @@ def export_gmsh(mesh: Mesh,
       The keys are the tags and the values are Callables that take a
       number of points and return a boolean that indicates whether the
       element is part of the tagged boundary or not.
+
+  Notes
+  -----
+  Node coordinates are written once for the volume entity; boundary patches only
+  add surface **elements** referencing those node tags — no duplicate vertices are
+  introduced for walls or caps.
   """
 
   try:
@@ -52,21 +58,23 @@ def export_gmsh(mesh: Mesh,
   try:
     gmsh.initialize()
 
+    # Contiguous node tags 1 … n match the number of written coordinates.
+    # Without this, sparse tags (max ≫ ncoords) confuse solvers that size DOF
+    # maps from the largest tag.
+    mesh = mesh.drop_points_and_renumber()
+    npoints = len(mesh.points)
+    node_tags = np.arange(1, npoints + 1, dtype=np.int64)
+
     model = gmsh.model.add_discrete_entity(mesh.ndims)
-    all_vertex_indices = mesh.active_indices
     gmsh.model.mesh.addNodes(mesh.ndims,
                              model,
-                             all_vertex_indices+1,
-                             mesh.points[all_vertex_indices].ravel())
+                             node_tags,
+                             mesh.points.ravel())
     gmsh.model.mesh.addElementsByType(model,
                                       MAP_EL_GMSH_TAG[mesh.reference_element],
                                       np.arange(len(mesh.elements)) + 1,
                                       mesh.pvelements.ravel() + 1)
-    gmsh.model.add_physical_group(mesh.ndims, [model],
-                                              name={0: 'Point',
-                                                    1: 'Line',
-                                                    2: 'Surface',
-                                                    3: 'Volume'}[mesh.ndims])
+    gmsh.model.add_physical_group(mesh.ndims, [model], name='Volume')
 
     nelems = len(mesh.elements)
 
@@ -93,7 +101,18 @@ def export_gmsh(mesh: Mesh,
 
     gmsh.model.geo.synchronize()
 
+    try:
+      gmsh.model.mesh.removeDuplicateNodes()
+    except Exception as exc:
+      log.warning(f'removeDuplicateNodes skipped during export: {exc}')
+
     gmsh.write(filename)
+    log.info(
+      'Gmsh export wrote %d nodes and %d volume cells to %s.',
+      npoints,
+      len(mesh.elements),
+      filename,
+    )
 
   except Exception as e:
     raise Exception(f'Error exporting mesh to {filename}: {e}')

@@ -484,7 +484,17 @@ class Mesh(Immutable, metaclass=MeshMeta):
     """
     if complement:
       return self - self.take_elements(selecter)
-    return self.take(elemindices=selecter(self.points[self.elements]))
+    raw = np.asarray(selecter(self.points[self.elements])).ravel()
+    nelems = len(self.elements)
+    # ``take`` casts ``elemindices`` with ``dtype=int``, turning a bool mask into
+    # ``[0, 1, 0, 1, …]`` (wrong). Accept bool / 0–1 masks or explicit indices.
+    if raw.dtype == bool:
+      indices = np.where(raw)[0]
+    elif raw.size == nelems and np.max(raw) <= 1 and np.min(raw) >= 0:
+      indices = np.where(raw)[0]
+    else:
+      indices = np.unique(raw.astype(int, copy=False))
+    return self.take(elemindices=indices)
 
   def export_gmsh(self, *args, **kwargs):
     from .export import export_gmsh
