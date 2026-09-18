@@ -73,7 +73,7 @@ class Mesh(Immutable, metaclass=MeshMeta):
   elements : :class:`np.ndarray` of integers or Sequence of integers.
       Element index array of shape (nelems, nverts).
   points : :class:`np.ndarray` or any array-like of type float.
-      Point index array of shape (npoints, 3).
+      Point coordinate array of shape (npoints, 3).
       The element index array must satisfy:
           0 <= elements.min() <= elements.max() < len(points).
       Not all ``points in self.points`` may be active. Meaning that the mesh
