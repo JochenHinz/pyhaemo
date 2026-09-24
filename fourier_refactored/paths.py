@@ -7,9 +7,9 @@ OUTPUT_displacement_path = path_to_directory / 'displacement/'
 OUTPUT_meshes_path = path_to_directory / 'meshes/'
 
 VESSEL_DATA_PATHS = {
-    'LAD': path_to_directory / 'data/reconSeptember/reconSept/reconstructions-LAD.npy',
-    'CX': path_to_directory / 'data/reconSeptember/reconSept/reconstructions-CX.npy',
-    'RCA': path_to_directory / 'data/reconSeptember/reconSept/reconstructions-RCA.npy',
+    'LAD': path_to_directory / 'data/newRecon/newRecon/reconstructions_new-LAD.npy',
+    'CX': path_to_directory / 'data/newRecon/newRecon/reconstructions_new-CX.npy',
+    'RCA': path_to_directory / 'data/newRecon/newRecon/reconstructions_new-RCA.npy',
 }
 
 # Acquisition frame rate, in frames per second, of the reconstructions --

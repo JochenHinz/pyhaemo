@@ -1,6 +1,10 @@
 """
-Space convergence study: full LAD motion, fixed timestep, sweeping the
+Space convergence study: full CX motion, fixed timestep, sweeping the
 spatial mesh resolution.
+
+The motion is the smoothing spline (SMOOTHING_FACTOR) of the reconstruction,
+evaluated at exactly t = k * TIMESTEP up to T_END (pipeline.spline_motion),
+so the same instants can be reused by the time convergence study.
 
 Each resolution level is specified as a single target element size dh (mm),
 not as a raw (nelems_cross_section, nelems_z) tuple: vessel length varies a
@@ -15,26 +19,32 @@ below): it sets the knot vector that the centerline spline is *fit* to
 geometry itself, not just the numerical mesh resolution. Sweeping it would
 confound geometric change with numerical convergence.
 
-This is a long-running batch job (each resolution level generates ~4000
-meshes at TIMESTEP=0.001s over the reconstructed heartbeats). Run with:
+This is a long-running batch job (each resolution level generates
+T_END / TIMESTEP + 1 meshes). Run every level, or only the given ones (e.g.
+one level per cluster job), with:
 
-    python3 run_space_convergence.py
+    python3 run_space_convergence.py [coarse] [medium] [fine]
 
-Before committing to that, check report_hmin() (bottom of this file): it
-builds just one mesh per resolution level (cheap) and prints h_min and mesh
-validity, e.g. to pick a CFL-safe solver timestep.
+Each level first checks mesh validity at a few instants (check_validity) and
+stops before the long export if any mesh is invalid. report_hmin() (bottom of
+this file) builds just one mesh per resolution level (cheap) and prints h_min
+and mesh validity, e.g. to pick a CFL-safe solver timestep.
 """
+import sys
+import time
+
 import numpy as np
 
 import paths as pt
-from pipeline import load_full_motion, build_spline, build_fourier
+from pipeline import load_full_motion, spline_motion
 from export import compute_incremental_displacement, create_mesh
 from mesh import min_edge_length
 
 VESSEL = 'CX'
 TIMESTEP = 0.001
+T_END = 1.0  # seconds of motion to export, from t=0
 SMOOTHING_FACTOR = 1
-BOUNDARY_LAYER_EXPONENT = 1.8 # 1. = uniform cross-section grid, no boundary layer
+BOUNDARY_LAYER_EXPONENT = 2.  # 1. = uniform cross-section grid, no boundary layer
 
 # fixed across every resolution level -- see module docstring.
 NELEMS_CENTERLINE = 50
@@ -43,10 +53,13 @@ NELEMS_CENTERLINE = 50
 # (nelems_cross_section, nelems_z) by resolution_for_dh(), from the actual
 # vessel geometry (VESSEL above).
 DH_LEVELS = {
-    'coarse': 0.4,
-    'medium': 0.2,  # current default resolution
-    'fine': 0.1,
+    'coarse': 0.3,
+    'medium': 0.15,
+    'fine': 0.075,
 }
+
+# instants (s) meshed by check_validity() before each level's full export.
+CHECK_TIMES = np.linspace(0, T_END, 11)
 
 
 def vessel_length(centerline):
@@ -79,20 +92,46 @@ def resolution_for_dh(dh, centerline, radii):
     return nelems_cross_section, nelems_z
 
 
-def main():
+def check_validity(centerlines, radii, nelems_cross_section, nelems_z):
+    """
+    Build (without exporting) the mesh at each of CHECK_TIMES and raise if
+    any is invalid, so an invalid configuration fails in minutes instead of
+    after the whole export. Also prints the time per mesh.
+    """
+    for t in CHECK_TIMES:
+        k = int(round(t / TIMESTEP))
+        start = time.time()
+        mesh = create_mesh(centerline=centerlines[k],
+                           radii=radii[k],
+                           filename='',
+                           export=False,
+                           nelems_centerline=NELEMS_CENTERLINE,
+                           nelems_cross_section=nelems_cross_section,
+                           nelems_z=nelems_z,
+                           boundary_layer_exponent=BOUNDARY_LAYER_EXPONENT)
+        valid = mesh.is_valid()
+        print(f'check t={t:.2f}s (step {k}): valid={valid}, '
+              f'{len(mesh.elements)} elements, built in {time.time() - start:.1f}s', flush=True)
+        if not valid:
+            raise RuntimeError(f'invalid mesh at t={t:.2f}s (step {k}), not exporting')
+
+
+def main(levels):
     sub_sampled = load_full_motion(VESSEL)
-    spline = build_fourier(sub_sampled, timestep=TIMESTEP, frequency_cutoff_percentage=40)
+    centerlines, radii = spline_motion(sub_sampled, TIMESTEP, t_end=T_END,
+                                       smoothing_factor=SMOOTHING_FACTOR)
 
-    centerlines = spline.physical_centerline
-    radii = spline.physical_radii
-
-    for label, dh in DH_LEVELS.items():
+    for label in levels:
+        dh = DH_LEVELS[label]
         nelems_cross_section, nelems_z = resolution_for_dh(dh, centerlines[0], radii[0])
 
         print(f'--- space convergence: {label} (dh={dh}mm -> '
              f'nelems_centerline={NELEMS_CENTERLINE}, '
              f'nelems_cross_section={nelems_cross_section}, '
-             f'nelems_z={nelems_z}) ---')
+             f'nelems_z={nelems_z}, '
+             f'{len(centerlines)} steps of {TIMESTEP}s) ---', flush=True)
+
+        check_validity(centerlines, radii, nelems_cross_section, nelems_z)
 
         out_label = f'{VESSEL}/{label}'
         compute_incremental_displacement(
@@ -117,10 +156,11 @@ def report_hmin():
     solver timestep before running the expensive full study.
     """
     sub_sampled = load_full_motion(VESSEL)
-    spline = build_fourier(sub_sampled, timestep=TIMESTEP, frequency_cutoff_percentage=40)
+    centerlines, all_radii = spline_motion(sub_sampled, TIMESTEP, t_end=T_END,
+                                           smoothing_factor=SMOOTHING_FACTOR)
 
-    centerline = spline.physical_centerline[0]
-    radii = spline.physical_radii[0]
+    centerline = centerlines[0]
+    radii = all_radii[0]
 
     for label, dh in DH_LEVELS.items():
         nelems_cross_section, nelems_z = resolution_for_dh(dh, centerline, radii)
@@ -144,4 +184,8 @@ def report_hmin():
 
 
 if __name__ == '__main__':
-    main()
+    levels = sys.argv[1:] or list(DH_LEVELS)
+    unknown = [label for label in levels if label not in DH_LEVELS]
+    if unknown:
+        raise SystemExit(f'unknown level(s) {unknown}, expected any of {list(DH_LEVELS)}')
+    main(levels)
